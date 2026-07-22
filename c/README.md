@@ -30,9 +30,13 @@ zakresie, który obejmuje.
 | `get` (agregator np→n24, HTTP) | pobiera i zapisuje SRT |
 | `napiprojekt download` / `fileinfo` (HTTP) | bajtowo |
 | `napisy24 download` (CheckSubAgent+ZIP) / `getid` (download.php+ZIP) | **plik+stdout bajtowo** (ZIP-inflate przez zlib) |
+| `napiprojekt upload` (mode=512/1024, **7z-AES**) | własny AES-256+SHA-256+kontener 7z; **archiwum rozpakowywalne przez `7z x`**; odpowiedź serwera == Python |
+
+Własna kryptografia zweryfikowana: **AES-256 (wektor FIPS-197)**, **SHA-256**,
+oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`).
 
 **Jeszcze nie w C** (kolejne etapy): napiprojekt `account`/`associate`, napisy24
-`login`/`imdb`; **upload 7z-AES** do napiprojekt; **interaktywny `sync`** (termios TUI).
+`login`/`imdb` (HTTP z poświadczeniami); **interaktywny `sync`** (termios TUI).
 **Wymaga TLS (osobny etap: vendorowanie BearSSL + certyfikaty):** OpenSubtitles
 (search/download/login) oraz logowanie/upload/delete WWW napisy24.
 
