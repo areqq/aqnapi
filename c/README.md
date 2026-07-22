@@ -24,11 +24,13 @@ zakresie, który obejmuje.
 | `fpsconv --from --to [--movie]` | bajtowo (z bankierskim zaokrągleniem) |
 | `merge` (auto/`--offset`) | bajtowo |
 | `split --at [--no-rebase]` | bajtowo |
+| `config {init,show,path}` | plik i `show` bajtowo == Python (hasła bez echo, chmod 600) |
+| `sync REF TGT --offset\|--anchor` (nieinteraktywny) | plik + stdout bajtowo == `aqnapi sync` |
 | `download FILM` (napiprojekt `mode=1`, HTTP+base64) | ścieżka HTTP + pipeline; komunikaty == `aqnapi napiprojekt download` |
 
 **Jeszcze nie w C** (kolejne etapy): plain-HTTP klienci napiprojekt
 (search/account/associate/fileinfo) i napisy24 (webapi search, CheckSubAgent+ZIP);
-`get` (agregator); upload 7z-AES do napiprojekt; `config`; `sync` (termios TUI).
+`get` (agregator); upload 7z-AES do napiprojekt; interaktywny `sync` (termios TUI).
 **Wymaga TLS (osobny etap: vendorowanie BearSSL + certyfikaty):** OpenSubtitles
 (search/download/login) oraz logowanie/upload/delete WWW napisy24.
 

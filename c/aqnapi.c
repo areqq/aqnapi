@@ -669,7 +669,14 @@ static double resolve_fps(const char*movie,double server_fps,double flag_fps){
 }
 #include <math.h>
 static long py_round(double x){ double f=floor(x); double d=x-f; if(d<0.5) return (long)f; if(d>0.5) return (long)f+1; long fl=(long)f; return (fl%2==0)?fl:fl+1; }
-static void apply_sync_c(Cues*in,double scale,long offset,Cues*out){ cues_init(out);
+static void sync_transform(long*tgt,long*ref,int n,double*scale,double*offset){
+    if(n==0){ *scale=1; *offset=0; return; }
+    if(n==1){ *scale=1; *offset=(double)(ref[0]-tgt[0]); return; }
+    double sx=0,sy=0,sxx=0,sxy=0; for(int i=0;i<n;i++){ sx+=tgt[i]; sy+=ref[i]; sxx+=(double)tgt[i]*tgt[i]; sxy+=(double)tgt[i]*ref[i]; }
+    double denom=(double)n*sxx-sx*sx; if(denom==0){ *scale=1; *offset=(sy-sx)/n; return; }
+    *scale=((double)n*sxy-sx*sy)/denom; *offset=(sy-*scale*sx)/n;
+}
+static void apply_sync_c(Cues*in,double scale,double offset,Cues*out){ cues_init(out);
     for(int i=0;i<in->n;i++){ Cue*c=&in->a[i]; long ns=py_round(c->start*scale+offset), ne=py_round(c->end*scale+offset);
         if(ns<0)ns=0; if(ne<0)ne=0; Cue*q=cues_push(out); q->start=ns; q->end=ne;
         for(int k=0;k<c->nlines;k++) cue_addline(q,c->lines[k],strlen(c->lines[k])); } }
@@ -748,6 +755,84 @@ static int cmd_split(const char*in,const char*out,char**at,int nat,int rebase,do
     printf("Podzielono na: %s%s\n",names.b, rebase?"  (czasy części wyzerowane)":""); free(names.b); return 0;
 }
 
+static int cmd_sync(const char*ref,const char*tgt,const char*out,double off_sec,int has_off,char**anch,int nanch,double flag_fps){
+    if(!ref||!tgt) die("sync wymaga dwóch plików: WZÓR CEL");
+    double fps=flag_fps>0?flag_fps:DEFAULT_FPS;
+    Cues rc,tc; load_cues_c(ref,fps,&rc); load_cues_c(tgt,fps,&tc);
+    double scale,offset;
+    if(has_off){ scale=1; offset=off_sec*1000.0; }
+    else if(nanch>0){ long T[64],R[64]; int np=0;
+        for(int i=0;i<nanch&&np<64;i++){ long ri,ti; char sep; if(sscanf(anch[i],"%ld%c%ld",&ri,&sep,&ti)<3||(sep!=','&&sep!=':')){ char m[128]; snprintf(m,sizeof m,"Zły format --anchor '%s' (użyj R,T)",anch[i]); die(m);}
+            if(ri<1||ri>rc.n||ti<1||ti>tc.n){ char m[128]; snprintf(m,sizeof m,"--anchor %s: numer linii poza zakresem",anch[i]); die(m);}
+            T[np]=tc.a[ti-1].start; R[np]=rc.a[ri-1].start; np++; }
+        sync_transform(T,R,np,&scale,&offset);
+    } else die("Interaktywny sync jeszcze nie w wersji C — użyj --offset SEK lub --anchor R,T.");
+    Cues syn; apply_sync_c(&tc,scale,offset,&syn);
+    char defname[512]; char*outp; if(out){ outp=xmalloc(strlen(out)+1); strcpy(outp,out); }
+    else { const char*dot=strrchr(tgt,'.'); size_t b=dot?(size_t)(dot-tgt):strlen(tgt); snprintf(defname,sizeof defname,"%.*s.synced.srt",(int)b,tgt); outp=xmalloc(strlen(defname)+1); strcpy(outp,defname); }
+    SB o; sb_init(&o); emit_srt(&syn,&o); write_file(outp,o.b,o.len);
+    printf("Zsynchronizowano: %s (%d linii)\n",outp,syn.n);
+    printf("  transformacja: nowy = %.5f * stary + (%+.3f s)\n",scale,offset/1000.0);
+    free(outp); free(o.b); return 0;
+}
+
+/* ---------------------------------------------------------------- config */
+static const char* config_path(const char*ov){ if(ov) return ov; static char buf[512]; const char*h=getenv("HOME"); snprintf(buf,sizeof buf,"%s/.config/aqnapi/config.ini",h?h:"."); return buf; }
+static int key_is_secret(const char*k){ return !strcmp(k,"pass")||!strcmp(k,"password"); }
+#include <sys/stat.h>
+#include <termios.h>
+static char* prompt_line(const char*label,int secret){
+    fputs(label,stdout); fflush(stdout);
+    struct termios old,neu; int istty=isatty(0);
+    if(secret&&istty){ tcgetattr(0,&old); neu=old; neu.c_lflag&=~ECHO; tcsetattr(0,TCSANOW,&neu); }
+    char buf[256]; if(!fgets(buf,sizeof buf,stdin)) buf[0]=0;
+    if(secret&&istty){ tcsetattr(0,TCSANOW,&old); fputc('\n',stdout); }
+    size_t n=strlen(buf); while(n&&(buf[n-1]=='\n'||buf[n-1]=='\r')) buf[--n]=0;
+    char*d=xmalloc(n+1); memcpy(d,buf,n+1); return d;
+}
+/* prosta reprezentacja ini z zachowaniem kolejności */
+typedef struct { char sec[3][16]; char key[3][8][24]; char val[3][8][256]; int nkeys[3]; } Ini;
+static void ini_load(const char*path,Ini*ini){ memset(ini,0,sizeof *ini);
+    strcpy(ini->sec[0],"napisy24"); strcpy(ini->sec[1],"napiprojekt"); strcpy(ini->sec[2],"opensubtitles");
+    FILE*f=fopen(path,"r"); if(!f) return; char line[512]; int cur=-1;
+    while(fgets(line,sizeof line,f)){ char*s=line; while(*s==' ')s++; size_t n=strlen(s); while(n&&(s[n-1]=='\n'||s[n-1]=='\r'||s[n-1]==' '))s[--n]=0;
+        if(s[0]=='['){ char sec[32]; snprintf(sec,sizeof sec,"%.*s",(int)(strlen(s)-2),s+1); cur=-1; for(int i=0;i<3;i++) if(!strcmp(sec,ini->sec[i])) cur=i; continue; }
+        if(cur<0||!s[0]) continue; char*eq=strchr(s,'='); if(!eq) continue; *eq=0; char*k=s,*v=eq+1; while(*v==' ')v++;
+        { size_t kn=strlen(k); while(kn&&k[kn-1]==' ')k[--kn]=0; } for(char*p=k;*p;p++)*p=tolower((unsigned char)*p);
+        int idx=ini->nkeys[cur]; if(idx<8){ snprintf(ini->key[cur][idx],24,"%s",k); snprintf(ini->val[cur][idx],256,"%s",v); ini->nkeys[cur]++; } }
+    fclose(f);
+}
+static void ini_set(Ini*ini,int sec,const char*k,const char*v){ for(int i=0;i<ini->nkeys[sec];i++) if(!strcmp(ini->key[sec][i],k)){ snprintf(ini->val[sec][i],256,"%s",v); return; }
+    int idx=ini->nkeys[sec]; if(idx<8){ snprintf(ini->key[sec][idx],24,"%s",k); snprintf(ini->val[sec][idx],256,"%s",v); ini->nkeys[sec]++; } }
+static const char* ini_get(Ini*ini,int sec,const char*k){ for(int i=0;i<ini->nkeys[sec];i++) if(!strcmp(ini->key[sec][i],k)) return ini->val[sec][i]; return ""; }
+static int cmd_config(const char*sub,const char*ov){
+    const char*path=config_path(ov);
+    if(!strcmp(sub,"path")){ printf("%s\n",path); return 0; }
+    Ini ini; ini_load(path,&ini);
+    if(!strcmp(sub,"show")){ int any=0; for(int i=0;i<3;i++) if(ini.nkeys[i])any=1;
+        if(!any){ printf("(pusty lub brak pliku: %s)\n",path); return 0; }
+        for(int i=0;i<3;i++){ if(!ini.nkeys[i]) continue; printf("[%s]\n",ini.sec[i]);
+            for(int k=0;k<ini.nkeys[i];k++){ const char*v=ini.val[i][k]; if(key_is_secret(ini.key[i][k])&&v[0]){ printf("  %s = ",ini.key[i][k]); for(size_t z=0;z<strlen(v);z++)putchar('*'); putchar('\n'); } else printf("  %s = %s\n",ini.key[i][k],v); } }
+        return 0; }
+    if(!strcmp(sub,"init")){
+        printf("Konfiguracja aqnapi — Enter zostawia obecną wartość.\n\n");
+        struct { int sec; const char*key; const char*prompt; int secret; } q[]={
+            {0,"login","Napisy24 login/e-mail",0},{0,"pass","Napisy24 hasło",1},
+            {1,"user","napiprojekt login",0},{1,"pass","napiprojekt hasło",1},
+            {2,"api_key","OpenSubtitles API key",0},{2,"username","OpenSubtitles login",0},{2,"password","OpenSubtitles hasło",1}};
+        for(int i=0;i<7;i++){ const char*cur=ini_get(&ini,q[i].sec,q[i].key); char lbl[128];
+            if(q[i].secret) snprintf(lbl,sizeof lbl,"%s%s: ",q[i].prompt,cur[0]?" [Enter=bez zmian]":"");
+            else snprintf(lbl,sizeof lbl,"%s%s%s%s: ",q[i].prompt,cur[0]?" [":"",cur,cur[0]?"]":"");
+            char*v=prompt_line(lbl,q[i].secret); if(v[0]) ini_set(&ini,q[i].sec,q[i].key,v); else if(cur[0]) ini_set(&ini,q[i].sec,q[i].key,cur); free(v); }
+        /* utwórz katalog */ char dir[512]; snprintf(dir,sizeof dir,"%s",path); char*sl=strrchr(dir,'/'); if(sl){ *sl=0; char cmd[600]; snprintf(cmd,sizeof cmd,"mkdir -p '%s'",dir); if(system(cmd)!=0){} }
+        FILE*f=fopen(path,"w"); if(!f) die("nie mogę zapisać konfiguracji");
+        for(int i=0;i<3;i++){ fprintf(f,"[%s]\n",ini.sec[i]); for(int k=0;k<ini.nkeys[i];k++) fprintf(f,"%s = %s\n",ini.key[i][k],ini.val[i][k]); fprintf(f,"\n"); }
+        fclose(f); chmod(path,0600);
+        printf("\nZapisano: %s (uprawnienia 600)\n",path); return 0;
+    }
+    fprintf(stderr,"config: użyj init | show | path\n"); return 2;
+}
+
 static void usage(void){
     printf("aqnapi %s (wersja C)\n"
         "Użycie:\n"
@@ -764,32 +849,34 @@ static void usage(void){
 }
 
 int main(int argc,char**argv){
-    if(argc<2){ usage(); return 2; }
-    const char*cmd=argv[1];
-    if(!strcmp(cmd,"--version")){ printf("aqnapi %s\n",VERSION); return 0; }
-    if(!strcmp(cmd,"--help")||!strcmp(cmd,"-h")){ usage(); return 0; }
-
-    const char*out=NULL,*movie=NULL,*lang=NULL,*fmt=NULL; double fps=0,from_fps=0,to_fps=0,maxd=0,mind=0;
+    const char*cmd=NULL,*out=NULL,*movie=NULL,*lang=NULL,*fmt=NULL,*cfgpath=NULL;
+    double fps=0,from_fps=0,to_fps=0,maxd=0,mind=0;
     int keep_tags=0,strip_sdh=0,no_san=0,rebase=1;
-    char*files[64]; int nfiles=0; double offs[32]; int noff=0; char*ats[64]; int nat=0;
-    for(int i=2;i<argc;i++){ const char*a=argv[i];
-        if(!strcmp(a,"-o")||!strcmp(a,"--output")){ if(++i<argc) out=argv[i]; }
+    char*files[64]; int nfiles=0; double offs[32]; int noff=0; char*ats[64]; int nat=0; char*anch[64]; int nanch=0;
+    /* parsowanie niezależne od pozycji (flagi globalne mogą być przed poleceniem) */
+    for(int i=1;i<argc;i++){ const char*a=argv[i];
+        if(!strcmp(a,"--version")){ printf("aqnapi %s\n",VERSION); return 0; }
+        else if(!strcmp(a,"--help")||!strcmp(a,"-h")){ usage(); return 0; }
+        else if(!strcmp(a,"-o")||!strcmp(a,"--output")){ if(++i<argc) out=argv[i]; }
         else if(!strcmp(a,"--movie")){ if(++i<argc) movie=argv[i]; }
         else if(!strcmp(a,"-l")||!strcmp(a,"--lang")){ if(++i<argc) lang=argv[i]; }
         else if(!strcmp(a,"--format")){ if(++i<argc) fmt=argv[i]; }
+        else if(!strcmp(a,"--config")){ if(++i<argc) cfgpath=argv[i]; }
         else if(!strcmp(a,"--fps")){ if(++i<argc) fps=atof(argv[i]); }
         else if(!strcmp(a,"--from")){ if(++i<argc) from_fps=atof(argv[i]); }
         else if(!strcmp(a,"--to")){ if(++i<argc) to_fps=atof(argv[i]); }
         else if(!strcmp(a,"--offset")){ if(++i<argc && noff<32) offs[noff++]=atof(argv[i]); }
         else if(!strcmp(a,"--at")){ if(++i<argc && nat<64) ats[nat++]=argv[i]; }
+        else if(!strcmp(a,"--anchor")){ if(++i<argc && nanch<64) anch[nanch++]=argv[i]; }
         else if(!strcmp(a,"--max-display")){ if(++i<argc) maxd=atof(argv[i]); }
         else if(!strcmp(a,"--min-display")){ if(++i<argc) mind=atof(argv[i]); }
         else if(!strcmp(a,"--keep-tags")) keep_tags=1;
         else if(!strcmp(a,"--strip-sdh")) strip_sdh=1;
         else if(!strcmp(a,"--no-sanitize")) no_san=1;
         else if(!strcmp(a,"--no-rebase")) rebase=0;
-        else if(a[0]!='-'){ if(nfiles<64) files[nfiles++]=argv[i]; }
+        else if(a[0]!='-'){ if(!cmd) cmd=a; else if(nfiles<64) files[nfiles++]=argv[i]; }
     }
+    if(!cmd){ usage(); return 2; }
     const char*pos = nfiles>0? files[0] : NULL;
     SanOpts opt=SAN_DEFAULT; opt.enabled=!no_san; opt.keep_tags=keep_tags; opt.strip_sdh=strip_sdh;
     opt.max_display_ms=(long)((maxd>0?maxd:10.0)*1000); opt.min_display_ms=(long)((mind>0?mind:0)*1000);
@@ -801,5 +888,7 @@ int main(int argc,char**argv){
     if(!strcmp(cmd,"fpsconv")){ if(!pos){usage();return 2;} return cmd_fpsconv(pos,out,from_fps,to_fps,movie,fmt); }
     if(!strcmp(cmd,"merge")){ return cmd_merge(files,nfiles,out,fps,fmt,offs,noff); }
     if(!strcmp(cmd,"split")){ if(!pos){usage();return 2;} return cmd_split(pos,out,ats,nat,rebase,fps,fmt); }
+    if(!strcmp(cmd,"config")){ return cmd_config(pos?pos:"show",cfgpath); }
+    if(!strcmp(cmd,"sync")){ return cmd_sync(nfiles>0?files[0]:NULL, nfiles>1?files[1]:NULL, out, noff>0?offs[0]:0, noff>0, anch, nanch, fps); }
     fprintf(stderr,"Nieznane polecenie: %s\n",cmd); usage(); return 2;
 }
