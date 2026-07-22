@@ -113,6 +113,113 @@ static int md5_10mb(const char*path,char out[33]){
 }
 static void md5_bytes(const unsigned char*p,size_t n,char out[33]){ MD5 m; md5_init(&m); md5_update(&m,p,n); unsigned char d[16]; md5_final(&m,d); hexlower(d,16,out); }
 
+/* ---------------------------------------------------------------- SHA-256 */
+typedef struct { uint32_t s[8]; uint64_t len; unsigned char buf[64]; size_t n; } SHA256;
+static uint32_t s_ror(uint32_t x,int c){ return (x>>c)|(x<<(32-c)); }
+static void sha256_block(SHA256*h,const unsigned char*p){
+    static const uint32_t K[64]={
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+    uint32_t w[64]; for(int i=0;i<16;i++) w[i]=((uint32_t)p[i*4]<<24)|((uint32_t)p[i*4+1]<<16)|((uint32_t)p[i*4+2]<<8)|p[i*4+3];
+    for(int i=16;i<64;i++){ uint32_t s0=s_ror(w[i-15],7)^s_ror(w[i-15],18)^(w[i-15]>>3); uint32_t s1=s_ror(w[i-2],17)^s_ror(w[i-2],19)^(w[i-2]>>10); w[i]=w[i-16]+s0+w[i-7]+s1; }
+    uint32_t a=h->s[0],b=h->s[1],c=h->s[2],d=h->s[3],e=h->s[4],f=h->s[5],g=h->s[6],hh=h->s[7];
+    for(int i=0;i<64;i++){ uint32_t S1=s_ror(e,6)^s_ror(e,11)^s_ror(e,25); uint32_t ch=(e&f)^(~e&g); uint32_t t1=hh+S1+ch+K[i]+w[i];
+        uint32_t S0=s_ror(a,2)^s_ror(a,13)^s_ror(a,22); uint32_t mj=(a&b)^(a&c)^(b&c); uint32_t t2=S0+mj;
+        hh=g;g=f;f=e;e=d+t1;d=c;c=b;b=a;a=t1+t2; }
+    h->s[0]+=a;h->s[1]+=b;h->s[2]+=c;h->s[3]+=d;h->s[4]+=e;h->s[5]+=f;h->s[6]+=g;h->s[7]+=hh;
+}
+static void sha256_init(SHA256*h){ uint32_t iv[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19}; memcpy(h->s,iv,32); h->len=0; h->n=0; }
+static void sha256_update(SHA256*h,const unsigned char*p,size_t n){ h->len+=n; while(n){ size_t k=64-h->n; if(k>n)k=n; memcpy(h->buf+h->n,p,k); h->n+=k; p+=k; n-=k; if(h->n==64){ sha256_block(h,h->buf); h->n=0; } } }
+static void sha256_final(SHA256*h,unsigned char out[32]){ uint64_t bits=h->len*8; unsigned char c=0x80; sha256_update(h,&c,1); unsigned char z=0; while(h->n!=56) sha256_update(h,&z,1);
+    unsigned char lb[8]; for(int i=0;i<8;i++) lb[i]=(bits>>(8*(7-i)))&0xff; sha256_update(h,lb,8);
+    for(int i=0;i<8;i++){ out[i*4]=h->s[i]>>24; out[i*4+1]=h->s[i]>>16; out[i*4+2]=h->s[i]>>8; out[i*4+3]=h->s[i]; } }
+
+/* ---------------------------------------------------------------- AES-256 (szyfr bloku) */
+static const unsigned char AES_SBOX[256]={
+0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16};
+static const unsigned char AES_RCON[14]={0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1B,0x36,0x6C,0xD8,0xAB,0x4D};
+static unsigned char aes_xtime(unsigned char a){ int r=a<<1; if(r&0x100) r^=0x11B; return r&0xFF; }
+static unsigned char aes_mul(unsigned char a,unsigned char b){ unsigned char r=0; for(int i=0;i<8;i++){ if(b&1) r^=a; b>>=1; a=aes_xtime(a); } return r; }
+typedef struct { unsigned char rk[15][16]; } AES;
+static void aes_init(AES*x,const unsigned char*key){ int nk=8,nr=14; unsigned char w[60][4];
+    for(int i=0;i<nk;i++) for(int j=0;j<4;j++) w[i][j]=key[i*4+j];
+    for(int i=nk;i<4*(nr+1);i++){ unsigned char t[4]; for(int j=0;j<4;j++) t[j]=w[i-1][j];
+        if(i%nk==0){ unsigned char tmp=t[0]; t[0]=AES_SBOX[t[1]]^AES_RCON[i/nk-1]; t[1]=AES_SBOX[t[2]]; t[2]=AES_SBOX[t[3]]; t[3]=AES_SBOX[tmp]; }
+        else if(i%nk==4){ for(int j=0;j<4;j++) t[j]=AES_SBOX[t[j]]; }
+        for(int j=0;j<4;j++) w[i][j]=w[i-nk][j]^t[j]; }
+    for(int r=0;r<=nr;r++) for(int c=0;c<4;c++) for(int j=0;j<4;j++) x->rk[r][c*4+j]=w[r*4+c][j];
+}
+static void aes_encrypt_block(AES*x,unsigned char*st){ int nr=14;
+    for(int i=0;i<16;i++) st[i]^=x->rk[0][i];
+    for(int r=1;r<nr;r++){ for(int i=0;i<16;i++) st[i]=AES_SBOX[st[i]];
+        unsigned char t[16]; for(int c=0;c<4;c++) for(int rr=0;rr<4;rr++) t[c*4+rr]=st[((c+rr)%4)*4+rr]; memcpy(st,t,16);
+        for(int c=0;c<4;c++){ unsigned char a0=st[c*4],a1=st[c*4+1],a2=st[c*4+2],a3=st[c*4+3];
+            st[c*4]=aes_mul(a0,2)^aes_mul(a1,3)^a2^a3; st[c*4+1]=a0^aes_mul(a1,2)^aes_mul(a2,3)^a3;
+            st[c*4+2]=a0^a1^aes_mul(a2,2)^aes_mul(a3,3); st[c*4+3]=aes_mul(a0,3)^a1^a2^aes_mul(a3,2); }
+        for(int i=0;i<16;i++) st[i]^=x->rk[r][i]; }
+    for(int i=0;i<16;i++) st[i]=AES_SBOX[st[i]];
+    unsigned char t[16]; for(int c=0;c<4;c++) for(int rr=0;rr<4;rr++) t[c*4+rr]=st[((c+rr)%4)*4+rr]; memcpy(st,t,16);
+    for(int i=0;i<16;i++) st[i]^=x->rk[nr][i];
+}
+
+/* ---------------------------------------------------------------- 7z-AES (zapis) */
+static void rand_bytes(unsigned char*b,size_t n){ FILE*f=fopen("/dev/urandom","rb"); if(f){ if(fread(b,1,n,f)!=n){} fclose(f); return; } for(size_t i=0;i<n;i++) b[i]=(unsigned char)(i*7+1); }
+static void sevenzip_key(const char*pw,unsigned char out[32]){ size_t pl=strlen(pw); unsigned char*p16=xmalloc(pl*2?pl*2:1);
+    for(size_t i=0;i<pl;i++){ p16[i*2]=pw[i]; p16[i*2+1]=0; }
+    SHA256 h; sha256_init(&h); uint64_t counter=0;
+    for(uint64_t i=0;i<(1ULL<<19);i++){ sha256_update(&h,p16,pl*2); unsigned char cb[8]; for(int k=0;k<8;k++) cb[k]=(counter>>(8*k))&0xff; sha256_update(&h,cb,8); counter++; }
+    sha256_final(&h,out); free(p16); }
+static unsigned char* aes_cbc(const unsigned char*key,const unsigned char*iv,const unsigned char*data,size_t n,size_t*outlen){
+    size_t pad=(n%16)?(16-n%16):0, total=n+pad; unsigned char*buf=xmalloc(total?total:1); memcpy(buf,data,n); memset(buf+n,0,pad);
+    AES x; aes_init(&x,key); unsigned char prev[16]; memcpy(prev,iv,16); unsigned char*out=xmalloc(total?total:1);
+    for(size_t off=0;off<total;off+=16){ unsigned char blk[16]; for(int i=0;i<16;i++) blk[i]=buf[off+i]^prev[i]; aes_encrypt_block(&x,blk); memcpy(out+off,blk,16); memcpy(prev,blk,16); }
+    free(buf); *outlen=total; return out; }
+static void z7num(SB*b,uint64_t value){ int first=0,mask=0x80,ii=8; for(int k=0;k<8;k++){ if(value<(1ULL<<(7*(k+1)))){ first|=(int)((value>>(8*k))&0xFF); ii=k; break; } first|=mask; mask>>=1; }
+    sb_putc(b,(char)(first&0xFF)); uint64_t v=value; for(int k=0;k<ii;k++){ sb_putc(b,(char)(v&0xFF)); v>>=8; } }
+static unsigned char* write_7z_aes(const char*entry,const unsigned char*data,size_t dlen,size_t*outlen){
+    unsigned char iv[16]; rand_bytes(iv,16); unsigned char key[32]; sevenzip_key("iBlm8NTigvru0Jr0",key);
+    size_t enclen; unsigned char*enc=aes_cbc(key,iv,data,dlen,&enclen);
+    uint32_t crc=crc32(0,data,dlen);
+    unsigned char props[18]; props[0]=0x53; props[1]=0x0F; memcpy(props+2,iv,16);
+    SB pack; sb_init(&pack); sb_putc(&pack,0x06); z7num(&pack,0); z7num(&pack,1); sb_putc(&pack,0x09); z7num(&pack,enclen); sb_putc(&pack,0x00);
+    SB folder; sb_init(&folder); z7num(&folder,1); sb_putc(&folder,0x24); sb_putn(&folder,"\x06\xf1\x07\x01",4); z7num(&folder,18); sb_putn(&folder,(char*)props,18);
+    SB unp; sb_init(&unp); sb_putc(&unp,0x07); sb_putc(&unp,0x0B); z7num(&unp,1); sb_putc(&unp,0x00); sb_putn(&unp,folder.b,folder.len);
+        sb_putc(&unp,0x0C); z7num(&unp,dlen); sb_putc(&unp,0x0A); sb_putc(&unp,0x01);
+        unsigned char cb[4]={(unsigned char)(crc&0xff),(unsigned char)((crc>>8)&0xff),(unsigned char)((crc>>16)&0xff),(unsigned char)((crc>>24)&0xff)}; sb_putn(&unp,(char*)cb,4); sb_putc(&unp,0x00);
+    SB si; sb_init(&si); sb_putc(&si,0x04); sb_putn(&si,pack.b,pack.len); sb_putn(&si,unp.b,unp.len); sb_putc(&si,0x00);
+    size_t nl=strlen(entry); SB name; sb_init(&name); for(size_t i=0;i<nl;i++){ sb_putc(&name,entry[i]); sb_putc(&name,0); } sb_putc(&name,0); sb_putc(&name,0);
+    SB fi; sb_init(&fi); sb_putc(&fi,0x05); z7num(&fi,1); sb_putc(&fi,0x11); z7num(&fi,name.len+1); sb_putc(&fi,0x00); sb_putn(&fi,name.b,name.len); sb_putc(&fi,0x00);
+    SB hdr; sb_init(&hdr); sb_putc(&hdr,0x01); sb_putn(&hdr,si.b,si.len); sb_putn(&hdr,fi.b,fi.len); sb_putc(&hdr,0x00);
+    uint32_t hcrc=crc32(0,(unsigned char*)hdr.b,hdr.len);
+    unsigned char sh[20]; for(int i=0;i<8;i++) sh[i]=(enclen>>(8*i))&0xff; for(int i=0;i<8;i++) sh[8+i]=(hdr.len>>(8*i))&0xff; for(int i=0;i<4;i++) sh[16+i]=(hcrc>>(8*i))&0xff;
+    uint32_t shcrc=crc32(0,sh,20);
+    SB arc; sb_init(&arc); sb_putn(&arc,"\x37\x7a\xbc\xaf\x27\x1c\x00\x04",8);
+    unsigned char c4[4]={(unsigned char)(shcrc&0xff),(unsigned char)((shcrc>>8)&0xff),(unsigned char)((shcrc>>16)&0xff),(unsigned char)((shcrc>>24)&0xff)};
+    sb_putn(&arc,(char*)c4,4); sb_putn(&arc,(char*)sh,20); sb_putn(&arc,(char*)enc,enclen); sb_putn(&arc,hdr.b,hdr.len);
+    *outlen=arc.len; unsigned char*o=xmalloc(arc.len); memcpy(o,arc.b,arc.len);
+    free(enc);free(pack.b);free(folder.b);free(unp.b);free(si.b);free(name.b);free(fi.b);free(hdr.b);free(arc.b); return o; }
+
 /* ---------------------------------------------------------------- FPS z pliku */
 static uint64_t rd_be(const unsigned char*p,int n){ uint64_t v=0; for(int i=0;i<n;i++) v=(v<<8)|p[i]; return v; }
 
@@ -331,8 +438,14 @@ static void parse_microdvd(const char*text,double fps,Cues*out){
 
 /* VTT: minimalne dekodowanie encji + usunięcie tagów <..> */
 static void html_unescape(char*s){
-    struct{const char*e;const char*r;} tab[]={{"&amp;","&"},{"&lt;","<"},{"&gt;",">"},{"&quot;","\""},{"&#39;","'"},{"&apos;","'"},{"&nbsp;"," "},{NULL,NULL}};
-    char*o=s,*p=s; while(*p){ if(*p=='&'){ int done=0; for(int i=0;tab[i].e;i++){ size_t el=strlen(tab[i].e); if(!strncmp(p,tab[i].e,el)){ for(const char*r=tab[i].r;*r;) *o++=*r++; p+=el; done=1; break; } } if(done) continue; } *o++=*p++; } *o=0;
+    struct{const char*e;const char*r;} tab[]={{"&amp;","&"},{"&lt;","<"},{"&gt;",">"},{"&quot;","\""},{"&apos;","'"},{"&nbsp;"," "},{NULL,NULL}};
+    char*o=s,*p=s; while(*p){
+        if(p[0]=='&'&&p[1]=='#'){ /* encja numeryczna &#NNN; lub &#xHH; */
+            const char*q=p+2; long cp=0; int hex=0; if(*q=='x'||*q=='X'){ hex=1; q++; }
+            const char*st=q; while(*q && *q!=';'){ int d; if(*q>='0'&&*q<='9')d=*q-'0'; else if(hex&&*q>='a'&&*q<='f')d=*q-'a'+10; else if(hex&&*q>='A'&&*q<='F')d=*q-'A'+10; else { q=st; break; } cp=cp*(hex?16:10)+d; q++; }
+            if(q>st&&*q==';'){ if(cp<0x80) *o++=(char)cp; else if(cp<0x800){ *o++=(char)(0xC0|(cp>>6)); *o++=(char)(0x80|(cp&0x3F)); } else { *o++=(char)(0xE0|(cp>>12)); *o++=(char)(0x80|((cp>>6)&0x3F)); *o++=(char)(0x80|(cp&0x3F)); } p=q+1; continue; } }
+        if(*p=='&'){ int done=0; for(int i=0;tab[i].e;i++){ size_t el=strlen(tab[i].e); if(!strncmp(p,tab[i].e,el)){ for(const char*r=tab[i].r;*r;) *o++=*r++; p+=el; done=1; break; } } if(done) continue; }
+        *o++=*p++; } *o=0;
 }
 static void vtt_clean(char*s){ /* usuń <...> */ char*o=s,*p=s; while(*p){ if(*p=='<'){ const char*e=strchr(p,'>'); if(e){ p=e+1; continue; } } *o++=*p++; } *o=0; html_unescape(s); }
 static long parse_vtt_time(const char*s){
@@ -638,6 +751,28 @@ static double np_file_info_fps(const char*movie_hash){
         "User-Agent: aqnapi-c/%s\r\nConnection: close\r\n\r\n", movie_hash,host,VERSION);
     sb_puts(&req,hdr); size_t bl; char*body=http_request(host,req.b,req.len,&bl); free(req.b);
     if(!body) return 0; char*p=strstr(body,"<fps>"); double v=0; if(p) v=atof(p+5); free(body); return v;
+}
+
+/* napiprojekt upload (mode=512/1024) — multipart z archiwum 7z-AES; zwraca XML (malloc) */
+static char* np_upload_http(const char*movie_hash,const unsigned char*subbytes,size_t sublen,
+                            const char*lang,const char*author,int corrected,const char*comment,int testing){
+    char entry[64],arcname[64]; snprintf(entry,sizeof entry,"%s.txt",movie_hash); snprintf(arcname,sizeof arcname,"%s.zip",movie_hash);
+    size_t arclen; unsigned char*arc=write_7z_aes(entry,subbytes,sublen,&arclen);
+    char subs_md5[33]; md5_bytes(subbytes,sublen,subs_md5);
+    const char*bnd="----aqnapicafe0002"; SB b; sb_init(&b);
+    #define TF(name,val) do{ sb_puts(&b,"--"); sb_puts(&b,bnd); sb_puts(&b,"\r\nContent-Disposition: form-data; name=\""); sb_puts(&b,name); sb_puts(&b,"\"\r\n\r\n"); sb_puts(&b,val); sb_puts(&b,"\r\n"); }while(0)
+    TF("client","aqnapi"); TF("client_ver",VERSION); TF("mode",corrected?"1024":"512");
+    TF("SubtitlesHash",subs_md5); TF("SubtitlesAutor",author?author:""); TF("SubtitlesLang",lang);
+    if(comment&&comment[0]) TF("SubtitlesComment",comment); if(testing) TF("OnlyTesting","1");
+    #undef TF
+    sb_puts(&b,"--"); sb_puts(&b,bnd); sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"subtitles\"; filename=\"");
+    sb_puts(&b,arcname); sb_puts(&b,"\"\r\nContent-Type: subtitles/zip\r\n\r\n"); sb_putn(&b,(char*)arc,arclen); sb_puts(&b,"\r\n");
+    sb_puts(&b,"--"); sb_puts(&b,bnd); sb_puts(&b,"--\r\n"); free(arc);
+    SB req; sb_init(&req); char hdr[512];
+    snprintf(hdr,sizeof hdr,"POST /api/api-napiprojekt3.php HTTP/1.0\r\nHost: www.napiprojekt.pl\r\nUser-Agent: aqnapi-c/%s\r\nAccept: */*\r\nContent-Type: multipart/form-data; boundary=%s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",VERSION,bnd,b.len);
+    sb_puts(&req,hdr); sb_putn(&req,b.b,b.len); free(b.b);
+    size_t bl; char*body=http_request("www.napiprojekt.pl",req.b,req.len,&bl); free(req.b);
+    return body;
 }
 
 static const char* basename_of(const char*p);   /* fwd */
@@ -947,7 +1082,7 @@ static int cmd_config(const char*sub,const char*ov){
 /* ---------------------------------------------------------------- wyszukiwanie */
 static char* xml_first(const char*hay,const char*tag){ char op[48],cl[48]; snprintf(op,sizeof op,"<%s>",tag); snprintf(cl,sizeof cl,"</%s>",tag);
     const char*s=strstr(hay,op); if(!s){ char*e=xmalloc(1); e[0]=0; return e; } s+=strlen(op); const char*e=strstr(s,cl); if(!e){ char*x=xmalloc(1); x[0]=0; return x; }
-    size_t n=e-s; char*o=xmalloc(n+1); memcpy(o,s,n); o[n]=0; strip_inplace(o); return o; }
+    size_t n=e-s; char*o=xmalloc(n+1); memcpy(o,s,n); o[n]=0; html_unescape(o); strip_inplace(o); return o; }
 static void norm_imdb(const char*in,char*out,size_t osz){ char dig[32]; int k=0; for(const char*p=in;*p&&k<31;p++) if(isdigit((unsigned char)*p)) dig[k++]=*p; dig[k]=0;
     if(k==0){ snprintf(out,osz,"%s",in); return; } char z[8]=""; int pad=7-k; for(int i=0;i<pad&&i<7;i++) z[i]='0'; z[pad>0?pad:0]=0; snprintf(out,osz,"tt%s%s",z,dig); }
 static void extract_tt(const char*s,char*out,size_t osz){ out[0]=0; /* znajdź "tt" po którym są cyfry (jak regex tt\d+) */
@@ -1013,6 +1148,21 @@ static int np_search(const char*title){
     return 0;
 }
 
+static int cmd_np_upload(const char*movie,const char*srt,const char*lang,const char*author,int corrected,const char*comment,int testing){
+    if(!movie||!srt) die("napiprojekt upload wymaga --movie i --srt");
+    size_t n; char*raw=read_file(srt,&n); if(!raw){ fprintf(stderr,"Brak pliku: %s\n",srt); return 1; }
+    char*text=decode_text((unsigned char*)raw,n); free(raw); size_t sl=strlen(text);
+    char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); free(text); return 1; }
+    char L[8]; snprintf(L,sizeof L,"%s",lang?lang:"PL"); for(char*p=L;*p;p++)*p=toupper((unsigned char)*p);
+    char*xml=np_upload_http(md,(unsigned char*)text,sl,L,author,corrected,comment,testing); free(text);
+    if(!xml) die("napiprojekt: błąd połączenia");
+    char*st=xml_first(xml,"status"),*wr=xml_first(xml,"warning"),*er=xml_first(xml,"error");
+    int ok=!strcasecmp(st,"uploaded")||!strcasecmp(st,"success")||!strcasecmp(st,"ok");
+    int rc; if(ok){ printf("[OK] %s\n", wr[0]?wr:(er[0]?er:st)); rc=0; }
+    else { printf("[BŁĄD] %s\n", er[0]?er:(wr[0]?wr:(st[0]?st:"serwer odrzucił upload"))); rc=1; }
+    free(st);free(wr);free(er);free(xml); return rc;
+}
+
 static void usage(void){
     printf("aqnapi %s (wersja C)\n"
         "Użycie:\n"
@@ -1031,7 +1181,8 @@ static void usage(void){
 int main(int argc,char**argv){
     const char*cmd=NULL,*out=NULL,*movie=NULL,*lang=NULL,*fmt=NULL,*cfgpath=NULL,*title=NULL,*imdb=NULL,*query=NULL;
     double fps=0,from_fps=0,to_fps=0,maxd=0,mind=0;
-    int keep_tags=0,strip_sdh=0,no_san=0,rebase=1;
+    int keep_tags=0,strip_sdh=0,no_san=0,rebase=1,corrected=0,testing=0;
+    const char*srt=NULL,*translator=NULL,*comment=NULL;
     char*files[64]; int nfiles=0; double offs[32]; int noff=0; char*ats[64]; int nat=0; char*anch[64]; int nanch=0;
     /* parsowanie niezależne od pozycji (flagi globalne mogą być przed poleceniem) */
     for(int i=1;i<argc;i++){ const char*a=argv[i];
@@ -1045,6 +1196,11 @@ int main(int argc,char**argv){
         else if(!strcmp(a,"--title")){ if(++i<argc) title=argv[i]; }
         else if(!strcmp(a,"--imdb")){ if(++i<argc) imdb=argv[i]; }
         else if(!strcmp(a,"--query")){ if(++i<argc) query=argv[i]; }
+        else if(!strcmp(a,"--srt")){ if(++i<argc) srt=argv[i]; }
+        else if(!strcmp(a,"--translator")){ if(++i<argc) translator=argv[i]; }
+        else if(!strcmp(a,"--comment")){ if(++i<argc) comment=argv[i]; }
+        else if(!strcmp(a,"--corrected")) corrected=1;
+        else if(!strcmp(a,"--test")||!strcmp(a,"--dry-run")) testing=1;
         else if(!strcmp(a,"--fps")){ if(++i<argc) fps=atof(argv[i]); }
         else if(!strcmp(a,"--from")){ if(++i<argc) from_fps=atof(argv[i]); }
         else if(!strcmp(a,"--to")){ if(++i<argc) to_fps=atof(argv[i]); }
@@ -1079,6 +1235,7 @@ int main(int argc,char**argv){
         if(!strcmp(sub,"download")){ if(!a1){usage();return 2;} return cmd_download(a1,lang,out,fps,opt); }
         if(!strcmp(sub,"fileinfo")){ if(!a1){usage();return 2;} return cmd_np_fileinfo(a1); }
         if(!strcmp(sub,"search")){ const char*t=a1?a1:(title?title:query); if(!t){usage();return 2;} return np_search(t); }
+        if(!strcmp(sub,"upload")){ return cmd_np_upload(movie,srt,lang,translator,corrected,comment,testing); }
         fprintf(stderr,"napiprojekt: '%s' nieobsługiwane w wersji C (użyj aqnapi.py)\n",sub); return 2; }
     if(!strcmp(cmd,"napisy24")||!strcmp(cmd,"n24")){ const char*sub=nfiles>0?files[0]:NULL,*a1=nfiles>1?files[1]:NULL; if(!sub){usage();return 2;}
         if(!strcmp(sub,"hash")){ if(!a1){usage();return 2;} return cmd_hash(a1); }
@@ -1087,5 +1244,14 @@ int main(int argc,char**argv){
         if(!strcmp(sub,"search")){ return n24_search(imdb,title); }
         fprintf(stderr,"napisy24: '%s' nieobsługiwane w wersji C (użyj aqnapi.py)\n",sub); return 2; }
     if(!strcmp(cmd,"opensubtitles")||!strcmp(cmd,"os")){ fprintf(stderr,"opensubtitles: wymaga TLS — użyj wersji Python (aqnapi.py)\n"); return 2; }
+    if(!strcmp(cmd,"_selftest")){
+        unsigned char key[32],pt[16],ct[16]; for(int i=0;i<32;i++)key[i]=i; for(int i=0;i<16;i++)pt[i]=(i<<4)|i;
+        AES x; aes_init(&x,key); memcpy(ct,pt,16); aes_encrypt_block(&x,ct); char h[33]; hexlower(ct,16,h);
+        printf("AES-256 FIPS: %s %s\n",h,!strcmp(h,"8ea2b7ca516745bfeafc49904b496089")?"OK":"FAIL");
+        SHA256 s; sha256_init(&s); sha256_update(&s,(unsigned char*)"abc",3); unsigned char d[32]; sha256_final(&s,d); char h2[65]; hexlower(d,32,h2);
+        printf("SHA-256(abc): %.16s… %s\n",h2,!strcmp(h2,"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")?"OK":"FAIL");
+        if(pos){ const char*msg="Zawartość testowa 7z-AES: ąćęłńóśźż\n"; size_t al; unsigned char*a=write_7z_aes("test.txt",(unsigned char*)msg,strlen(msg),&al);
+            write_file(pos,(char*)a,al); free(a); printf("Archiwum 7z zapisane: %s (%zu B)\n",pos,al); }
+        return 0; }
     fprintf(stderr,"Nieznane polecenie: %s\n",cmd); usage(); return 2;
 }
