@@ -1,5 +1,6 @@
 # artefakty budowania wersji uniwersalnej (Cosmopolitan)
 /dist/
 /cosmo/python.ape
+/c/toolchain/
 __pycache__/
 *.pyc

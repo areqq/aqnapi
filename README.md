@@ -202,6 +202,10 @@ cosmo/build.sh            # -> dist/aqnapi.com
 
 Szczegóły, uruchamianie per platforma i weryfikacja: [`cosmo/README.md`](cosmo/README.md).
 
+Istnieje też niezależny **natywny POC w C** (`c/aqnapi.c`, kompilowany przez
+`cosmocc`) — podzbiór poleceń (`hash`, `fps`, `convert`, `download`) **bajtowo
+zgodny** z wersją Python. Zob. [`c/README.md`](c/README.md).
+
 ## Testy
 
 ```bash
