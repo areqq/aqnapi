@@ -22,6 +22,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <unistd.h>
+#include "third_party/zlib/zlib.h"
 
 #define VERSION "1.0.0"
 #define CHUNK_10MB (10*1024*1024)
@@ -317,7 +318,10 @@ static void parse_microdvd(const char*text,double fps,Cues*out){
             Cue*q=cues_push(out); q->start=sm; q->end=em;
             /* split body na '|' */
             const char*p=body; while(1){ const char*bar=strchr(p,'|'); size_t len=bar?(size_t)(bar-p):strlen(p);
-                char*seg=xmalloc(len+1); memcpy(seg,p,len); seg[len]=0; strip_format_tags(seg); cue_addline(q,seg,strlen(seg)); free(seg);
+                char*seg=xmalloc(len+1); memcpy(seg,p,len); seg[len]=0;
+                /* MicroDVD: usuń TYLKO klamry {..} (jak Python), NIE tagi <..> */
+                { char*o=seg,*r=seg; while(*r){ if(*r=='{'){ char*ee=strchr(r,'}'); if(ee){ r=ee+1; continue; } } *o++=*r++; } *o=0; }
+                cue_addline(q,seg,strlen(seg)); free(seg);
                 if(!bar) break; p=bar+1; }
         }
         free(t);
@@ -636,6 +640,83 @@ static double np_file_info_fps(const char*movie_hash){
     if(!body) return 0; char*p=strstr(body,"<fps>"); double v=0; if(p) v=atof(p+5); free(body); return v;
 }
 
+static const char* basename_of(const char*p);   /* fwd */
+
+/* GET po czystym HTTP/1.0 (z Referer) */
+static char* http_get_url(const char*host,const char*path,size_t*len){
+    SB req; sb_init(&req); char hdr[1200];
+    snprintf(hdr,sizeof hdr,"GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: aqnapi-c/%s\r\nReferer: http://%s\r\nAccept: */*\r\nConnection: close\r\n\r\n",path,host,VERSION,host);
+    sb_puts(&req,hdr); char*b=http_request(host,req.b,req.len,len); free(req.b); return b;
+}
+static char* url_encode(const char*s){ static const char*H="0123456789ABCDEF"; SB b; sb_init(&b);
+    for(const unsigned char*p=(const unsigned char*)s;*p;p++){ if(isalnum(*p)||*p=='-'||*p=='_'||*p=='.'||*p=='~') sb_putc(&b,*p);
+        else { sb_putc(&b,'%'); sb_putc(&b,H[*p>>4]); sb_putc(&b,H[*p&15]); } } return b.b; }
+
+/* zaciemnianie pól napisy24 (obf): XOR maską, reverse, UPPER hex */
+static char* n24_obf(const char*s){ size_t n=strlen(s); unsigned char*enc=xmalloc(n?n:1);
+    for(size_t i=0;i<n;i++){ int mask=(0x7F+(int)((i+1)*(i+1)))&0xFF; enc[i]=(unsigned char)s[i]^mask; }
+    static const char*H="0123456789ABCDEF"; char*out=xmalloc(n*2+1);
+    for(size_t i=0;i<n;i++){ unsigned char b=enc[n-1-i]; out[i*2]=H[b>>4]; out[i*2+1]=H[b&15]; } out[n*2]=0; free(enc); return out; }
+
+/* wyciągnij największy plik napisowy z archiwum ZIP (central dir + inflate/stored) */
+static unsigned char* zip_extract(const unsigned char*z,size_t zn,size_t*outlen){
+    if(zn<22) return NULL; long e=-1; long lim=(long)zn-22-65536; if(lim<0)lim=0;
+    for(long i=(long)zn-22;i>=lim;i--){ if(z[i]==0x50&&z[i+1]==0x4b&&z[i+2]==0x05&&z[i+3]==0x06){ e=i; break; } }
+    if(e<0) return NULL;
+    uint32_t cd_off=z[e+16]|(z[e+17]<<8)|(z[e+18]<<16)|((uint32_t)z[e+19]<<24);
+    uint16_t cnt=z[e+10]|(z[e+11]<<8);
+    long p=cd_off, best_lho=-1; uint32_t best_us=0,best_cs=0; uint16_t best_m=0; int have=0;
+    for(int k=0;k<cnt && p+46<=(long)zn;k++){ if(!(z[p]==0x50&&z[p+1]==0x4b&&z[p+2]==0x01&&z[p+3]==0x02)) break;
+        uint16_t method=z[p+10]|(z[p+11]<<8);
+        uint32_t csize=z[p+20]|(z[p+21]<<8)|(z[p+22]<<16)|((uint32_t)z[p+23]<<24);
+        uint32_t usize=z[p+24]|(z[p+25]<<8)|(z[p+26]<<16)|((uint32_t)z[p+27]<<24);
+        uint16_t nlen=z[p+28]|(z[p+29]<<8), elen=z[p+30]|(z[p+31]<<8), clen=z[p+32]|(z[p+33]<<8);
+        uint32_t lho=z[p+42]|(z[p+43]<<8)|(z[p+44]<<16)|((uint32_t)z[p+45]<<24);
+        const char*name=(const char*)z+p+46;
+        int is_url=(nlen>=4)&&!strncasecmp(name+nlen-4,".url",4);
+        if(!is_url && (!have || usize>best_us)){ have=1; best_us=usize; best_cs=csize; best_m=method; best_lho=lho; }
+        p+=46+nlen+elen+clen; }
+    if(best_lho<0||best_lho+30>(long)zn) return NULL;
+    const unsigned char*L=z+best_lho; if(!(L[0]==0x50&&L[1]==0x4b&&L[2]==0x03&&L[3]==0x04)) return NULL;
+    uint16_t lnlen=L[26]|(L[27]<<8), lelen=L[28]|(L[29]<<8);
+    const unsigned char*data=L+30+lnlen+lelen;
+    unsigned char*o=xmalloc(best_us+1);
+    if(best_m==0){ memcpy(o,data,best_us); o[best_us]=0; *outlen=best_us; return o; }
+    z_stream s; memset(&s,0,sizeof s); if(inflateInit2(&s,-15)!=Z_OK){ free(o); return NULL; }
+    s.next_in=(unsigned char*)data; s.avail_in=best_cs; s.next_out=o; s.avail_out=best_us;
+    inflate(&s,Z_FINISH); inflateEnd(&s); *outlen=s.total_out; o[s.total_out]=0; return o;
+}
+
+/* napisy24 CheckSubAgent (bez logowania) -> bajty ZIP lub NULL */
+static unsigned char* n24_checksub_agent(const char*movie,const char*lang,size_t*outlen){
+    char osh[17]; if(oshash(movie,osh)!=0) return NULL; char md[33]; md5_10mb(movie,md);
+    for(char*p=osh;*p;p++)*p=toupper((unsigned char)*p);
+    char fs[32]; snprintf(fs,sizeof fs,"%ld",file_size(movie)); const char*fn=basename_of(movie);
+    char*efn=url_encode(fn);
+    SB body; sb_init(&body); char tmp[512];
+    snprintf(tmp,sizeof tmp,"postAction=CheckSub&ua=dmnapi&ap=4lumen28&fh=%s&md=%s&fs=%s&fn=%s&nl=%s",osh,md,fs,efn,lang); sb_puts(&body,tmp); free(efn);
+    SB req; sb_init(&req); char hdr[512];
+    snprintf(hdr,sizeof hdr,"POST /run/CheckSubAgent.php HTTP/1.0\r\nHost: napisy24.pl\r\nUser-Agent: Mozilla/4.0\r\nAccept: */*\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",body.len);
+    sb_puts(&req,hdr); sb_putn(&req,body.b,body.len); free(body.b);
+    size_t bl; char*resp=http_request("napisy24.pl",req.b,req.len,&bl); free(req.b);
+    if(!resp) die("napisy24: błąd połączenia");
+    /* format: OK-N|meta||<zip> */
+    char*sep=NULL; for(size_t i=0;i+1<bl;i++) if(resp[i]=='|'&&resp[i+1]=='|'){ sep=resp+i; break; }
+    int count=0; sscanf(resp,"OK-%d",&count);
+    if(count<=0||!sep){ free(resp); return NULL; }
+    size_t zlen=bl-(sep+2-resp); unsigned char*zip=xmalloc(zlen); memcpy(zip,sep+2,zlen);
+    unsigned char*sub=zip_extract(zip,zlen,outlen); free(zip); free(resp); return sub;
+}
+
+/* napisy24 download.php?napisId=N -> bajty ZIP -> napisy */
+static unsigned char* n24_download_id(const char*id,size_t*outlen){
+    char path[128]; char*eid=url_encode(id); snprintf(path,sizeof path,"/run/pages/download.php?napisId=%s",eid); free(eid);
+    size_t bl; char*body=http_get_url("napisy24.pl",path,&bl);
+    if(!body){ die("napisy24: błąd połączenia"); }
+    if(bl<2||body[0]!='P'||body[1]!='K'){ free(body); return NULL; }
+    unsigned char*sub=zip_extract((unsigned char*)body,bl,outlen); free(body); return sub;
+}
+
 /* ---------------------------------------------------------------- I/O plików */
 static char* read_file(const char*path,size_t*len){ FILE*f=fopen(path,"rb"); if(!f) return NULL;
     fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET); char*b=xmalloc(n+1); size_t r=fread(b,1,n,f); b[r]=0; fclose(f); if(len)*len=r; return b; }
@@ -712,6 +793,36 @@ static int cmd_download(const char*movie,const char*lang,const char*out,double f
     char*outp=default_out(movie,out); write_file(outp,o.b,o.len);
     print_saved(outp,o.len,&rep);
     free(outp); free(o.b); return 0;
+}
+static int cmd_n24_getid(const char*id,const char*out,const char*movie,double flag_fps,SanOpts opt){
+    size_t dl; unsigned char*sub=n24_download_id(id,&dl);
+    if(!sub){ fprintf(stderr,"Nie znaleziono: Serwer nie zwrócił ZIP dla napisId=%s\n",id); return 1; }
+    double fps=resolve_fps(movie,0,flag_fps);
+    SB o; sb_init(&o); SanReport rep; convert_bytes(sub,dl,fps,"srt",&opt,&o,&rep); free(sub);
+    char*outp=out?strdup(out):strdup("napisy.srt"); write_file(outp,o.b,o.len); print_saved(outp,o.len,&rep);
+    free(outp); free(o.b); return 0;
+}
+static int cmd_n24_download(const char*movie,const char*lang,const char*out,double flag_fps,SanOpts opt){
+    char L[8]; snprintf(L,sizeof L,"%s",lang?lang:"pl"); for(char*p=L;*p;p++)*p=toupper((unsigned char)*p);
+    size_t dl; unsigned char*sub=n24_checksub_agent(movie,L,&dl);
+    if(!sub){ printf("Brak napisów dla: %s\n",movie); return 1; }
+    double fps=resolve_fps(movie,0,flag_fps);
+    SB o; sb_init(&o); SanReport rep; convert_bytes(sub,dl,fps,"srt",&opt,&o,&rep); free(sub);
+    char*outp=default_out(movie,out); write_file(outp,o.b,o.len); print_saved(outp,o.len,&rep);
+    free(outp); free(o.b); return 0;
+}
+static int cmd_np_fileinfo(const char*movie){ char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); return 1; }
+    double f=np_file_info_fps(md); if(f>0) printf("FPS (serwer): %g\n",f); else printf("Brak danych FPS\n"); return 0; }
+static int cmd_get(const char*movie,const char*lang,const char*out,double flag_fps,SanOpts opt){
+    char L[8]; snprintf(L,sizeof L,"%s",lang?lang:"pl"); for(char*p=L;*p;p++)*p=toupper((unsigned char)*p);
+    double fps=resolve_fps(movie,0,flag_fps); char*outp=default_out(movie,out);
+    /* napiprojekt */ char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); free(outp); return 1; }
+    size_t dl; unsigned char*sub=np_download(md,L,&dl);
+    if(sub){ SB o; sb_init(&o); SanReport rep; convert_bytes(sub,dl,fps,"srt",&opt,&o,&rep); free(sub); write_file(outp,o.b,o.len); print_saved(outp,o.len,&rep); printf("Źródło: napiprojekt\n"); free(outp); free(o.b); return 0; }
+    /* napisy24 */ unsigned char*s2=n24_checksub_agent(movie,L,&dl);
+    if(s2){ SB o; sb_init(&o); SanReport rep; convert_bytes(s2,dl,fps,"srt",&opt,&o,&rep); free(s2); write_file(outp,o.b,o.len); print_saved(outp,o.len,&rep); printf("Źródło: napisy24\n"); free(outp); free(o.b); return 0; }
+    printf("Nie znaleziono napisów. Szczegóły:\n  - napiprojekt: napiprojekt nie ma napisów dla tego pliku\n  - napisy24: brak trafień\n  - opensubtitles: wymaga wersji Python (TLS)\n");
+    free(outp); return 1;
 }
 static int cmd_fpsconv(const char*in,const char*out,double from_fps,double to_fps,const char*movie,const char*fmt_flag){
     if(to_fps<=0 && movie){ double f=trusted_fps(fps_from_file(movie)); if(f) to_fps=f; }
@@ -890,5 +1001,16 @@ int main(int argc,char**argv){
     if(!strcmp(cmd,"split")){ if(!pos){usage();return 2;} return cmd_split(pos,out,ats,nat,rebase,fps,fmt); }
     if(!strcmp(cmd,"config")){ return cmd_config(pos?pos:"show",cfgpath); }
     if(!strcmp(cmd,"sync")){ return cmd_sync(nfiles>0?files[0]:NULL, nfiles>1?files[1]:NULL, out, noff>0?offs[0]:0, noff>0, anch, nanch, fps); }
+    if(!strcmp(cmd,"get")){ if(!pos){usage();return 2;} return cmd_get(pos,lang,out,fps,opt); }
+    if(!strcmp(cmd,"napiprojekt")||!strcmp(cmd,"np")){ const char*sub=nfiles>0?files[0]:NULL,*a1=nfiles>1?files[1]:NULL; if(!sub){usage();return 2;}
+        if(!strcmp(sub,"download")){ if(!a1){usage();return 2;} return cmd_download(a1,lang,out,fps,opt); }
+        if(!strcmp(sub,"fileinfo")){ if(!a1){usage();return 2;} return cmd_np_fileinfo(a1); }
+        fprintf(stderr,"napiprojekt: '%s' nieobsługiwane w wersji C (użyj aqnapi.py)\n",sub); return 2; }
+    if(!strcmp(cmd,"napisy24")||!strcmp(cmd,"n24")){ const char*sub=nfiles>0?files[0]:NULL,*a1=nfiles>1?files[1]:NULL; if(!sub){usage();return 2;}
+        if(!strcmp(sub,"hash")){ if(!a1){usage();return 2;} return cmd_hash(a1); }
+        if(!strcmp(sub,"getid")){ if(!a1){usage();return 2;} return cmd_n24_getid(a1,out,movie,fps,opt); }
+        if(!strcmp(sub,"download")){ if(!a1){usage();return 2;} return cmd_n24_download(a1,lang,out,fps,opt); }
+        fprintf(stderr,"napisy24: '%s' nieobsługiwane w wersji C (użyj aqnapi.py)\n",sub); return 2; }
+    if(!strcmp(cmd,"opensubtitles")||!strcmp(cmd,"os")){ fprintf(stderr,"opensubtitles: wymaga TLS — użyj wersji Python (aqnapi.py)\n"); return 2; }
     fprintf(stderr,"Nieznane polecenie: %s\n",cmd); usage(); return 2;
 }
