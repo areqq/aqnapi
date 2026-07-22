@@ -26,11 +26,13 @@ zakresie, który obejmuje.
 | `split --at [--no-rebase]` | bajtowo |
 | `config {init,show,path}` | plik i `show` bajtowo == Python (hasła bez echo, chmod 600) |
 | `sync REF TGT --offset\|--anchor` (nieinteraktywny) | plik + stdout bajtowo == `aqnapi sync` |
-| `download FILM` (napiprojekt `mode=1`, HTTP+base64) | ścieżka HTTP + pipeline; komunikaty == `aqnapi napiprojekt download` |
+| `search` / `napiprojekt search` / `napisy24 search` (agreg. + per-serwis) | stdout bajtowo == Python (live) |
+| `get` (agregator np→n24, HTTP) | pobiera i zapisuje SRT |
+| `napiprojekt download` / `fileinfo` (HTTP) | bajtowo |
+| `napisy24 download` (CheckSubAgent+ZIP) / `getid` (download.php+ZIP) | **plik+stdout bajtowo** (ZIP-inflate przez zlib) |
 
-**Jeszcze nie w C** (kolejne etapy): plain-HTTP klienci napiprojekt
-(search/account/associate/fileinfo) i napisy24 (webapi search, CheckSubAgent+ZIP);
-`get` (agregator); upload 7z-AES do napiprojekt; interaktywny `sync` (termios TUI).
+**Jeszcze nie w C** (kolejne etapy): napiprojekt `account`/`associate`, napisy24
+`login`/`imdb`; **upload 7z-AES** do napiprojekt; **interaktywny `sync`** (termios TUI).
 **Wymaga TLS (osobny etap: vendorowanie BearSSL + certyfikaty):** OpenSubtitles
 (search/download/login) oraz logowanie/upload/delete WWW napisy24.
 
