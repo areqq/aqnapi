@@ -1,0 +1,62 @@
+name: Release
+
+# Wyzwalane tagiem wersji, np. v1.0.0. Buduje uniwersalną binarkę APE,
+# weryfikuje zgodność wersji, uruchamia testy i publikuje GitHub Release
+# z binarką (.com/.exe), źródłem i sumami SHA256.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sprawdź zgodność tagu z __version__
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver=$(python3 -c "import re,sys; \
+            print(re.search(r'__version__ = \"([^\"]+)\"', open('aqnapi.py').read()).group(1))")
+          echo "tag=$tag  __version__=$ver"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::Tag v$tag nie zgadza się z __version__ = $ver w aqnapi.py"
+            exit 1
+          fi
+
+      - name: Zainstaluj zip + 7-Zip
+        run: sudo apt-get update && sudo apt-get install -y zip p7zip-full
+
+      - name: Testy (CPython)
+        run: python3 -m unittest discover -s tests
+
+      - name: Zbuduj binarkę APE
+        run: sh cosmo/build.sh
+
+      - name: Parność — testy pod interpreterem APE
+        run: ./cosmo/python.ape -m unittest discover -s tests
+
+      - name: Przygotuj artefakty
+        run: |
+          ver="${GITHUB_REF_NAME}"
+          mkdir -p out
+          cp dist/aqnapi.com "out/aqnapi.com"           # stabilny URL latest
+          cp dist/aqnapi.com "out/aqnapi.exe"           # nazwa pod Windows
+          cp dist/aqnapi.com "out/aqnapi-${ver}.com"    # wersjonowana
+          cp aqnapi.py       "out/aqnapi.py"            # źródło (moduł/skrypt)
+          ( cd out && sha256sum * > SHA256SUMS.txt )
+          echo "Artefakty:"; ls -la out
+
+      - name: Utwórz GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "aqnapi ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            out/aqnapi.com out/aqnapi.exe "out/aqnapi-${GITHUB_REF_NAME}.com" \
+            out/aqnapi.py out/SHA256SUMS.txt

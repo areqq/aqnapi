@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Testy (CPython ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Zainstaluj 7-Zip (test archiwum 7z-AES)
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+      - name: Uruchom testy
+        run: python -m unittest discover -s tests -v
+
+  ape:
+    name: Binarka APE + parność testów
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Zainstaluj zip + 7-Zip
+        run: sudo apt-get update && sudo apt-get install -y zip p7zip-full
+      - name: Cache interpretera APE
+        uses: actions/cache@v4
+        with:
+          path: cosmo/python.ape
+          key: cosmo-python-v1
+      - name: Zbuduj aqnapi.com
+        run: sh cosmo/build.sh
+      - name: Parność — testy pod interpreterem APE
+        run: ./cosmo/python.ape -m unittest discover -s tests
+      - name: Smoke binarki
+        run: |
+          ./dist/aqnapi.com --version
+          ./dist/aqnapi.com --help >/dev/null
+          printf '{0}{25}Test' > /tmp/s.txt
+          ./dist/aqnapi.com convert /tmp/s.txt -o /tmp/s.srt --fps 25
+          head -c3 /tmp/s.srt | xxd | grep -q "efbb bf" && echo "BOM OK"
