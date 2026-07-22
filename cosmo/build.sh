@@ -31,6 +31,7 @@ if [ ! -f "$cache" ]; then
     echo "Brak curl/wget do pobrania interpretera."; exit 1
   fi
 fi
+chmod +x "$cache"      # interpreter APE musi być wykonywalny (też po restore z cache)
 
 cp "$cache" "$out"
 
