@@ -259,6 +259,20 @@ static void strip_format_tags(char*s){
     *o=0;
 }
 
+/* usuń SDH/HI: [odgłosy], (opisy), etykieta MÓWCA:, nuty ♪♫# — jak strip_sdh_line */
+static void strip_sdh_line(char*s){
+    { char*o=s,*p=s; while(*p){ if(*p=='['){ char*e=strchr(p,']'); if(e){ p=e+1; continue; } }
+        if(*p=='('){ char*e=strchr(p,')'); if(e){ p=e+1; continue; } } *o++=*p++; } *o=0; }
+    { char*p=s; while(*p==' '||*p=='-')p++; char*st=p;
+        if(isupper((unsigned char)*p)){ char*q=p+1; int len=1;
+            while(*q&&len<=21&&(isupper((unsigned char)*q)||isdigit((unsigned char)*q)||*q==' '||*q=='.'||*q=='\''||*q=='-')){ q++; len++; }
+            if(*q==':' && (q-st)>=2){ char*after=q+1; while(*after==' ')after++; memmove(s,after,strlen(after)+1); } } }
+    { char*o=s,*p=s; while(*p){ if(*p=='#'){ p++; continue; }
+        if((unsigned char)p[0]==0xE2&&(unsigned char)p[1]==0x99&&((unsigned char)p[2]==0xAA||(unsigned char)p[2]==0xAB)){ p+=3; continue; }
+        *o++=*p++; } *o=0; }
+    strip_inplace(s);
+}
+
 /* ---------------------------------------------------------------- czas -> tekst */
 static void ms_to_srt(long ms,char out[16]){ if(ms<0) ms=0; long h=ms/3600000; ms-=h*3600000; long m=ms/60000; ms-=m*60000; long s=ms/1000; ms-=s*1000; snprintf(out,16,"%02ld:%02ld:%02ld,%03ld",h,m,s,ms); }
 
@@ -343,16 +357,88 @@ static void parse_vtt(const char*text,Cues*out){
     lines_free(&L);
 }
 
-/* wykrycie formatu (podzbiór POC: srt/microdvd/vtt) */
+/* MPL2: [start][end]text (dziesiąte sekundy); '/' na początku linii = kursywa (usuwane) */
+static void parse_mpl2(const char*text,Cues*out){
+    Lines L=split_lines(text);
+    for(int i=0;i<L.n;i++){ char*s=xmalloc(strlen(L.a[i])+1); strcpy(s,L.a[i]); strip_inplace(s);
+        long a,b; int nn=0;
+        if(sscanf(s,"[%ld][%ld]%n",&a,&b,&nn)==2){
+            const char*body=s+nn; Cue*q=cues_push(out); q->start=a*100; q->end=b*100;
+            const char*p=body; while(1){ const char*bar=strchr(p,'|'); size_t len=bar?(size_t)(bar-p):strlen(p);
+                const char*seg=p; if(len>0&&seg[0]=='/'){ seg++; len--; }
+                cue_addline(q,seg,len); if(!bar) break; p=bar+1; }
+        }
+        free(s);
+    }
+    lines_free(&L);
+}
+/* TMPlayer: hh:mm:ss[:=]text ; koniec = start następnej lub +3000 */
+static void parse_tmplayer(const char*text,Cues*out){
+    Lines L=split_lines(text); int first=out->n;
+    for(int i=0;i<L.n;i++){ char*s=xmalloc(strlen(L.a[i])+1); strcpy(s,L.a[i]); strip_inplace(s);
+        long h,m,sec; char sep; int nn=0;
+        if(sscanf(s,"%ld:%2ld:%2ld%c%n",&h,&m,&sec,&sep,&nn)>=4 && (sep==':'||sep=='=')){
+            const char*body=s+nn; long st=(h*3600+m*60+sec)*1000; Cue*q=cues_push(out); q->start=st; q->end=st+3000;
+            const char*p=body; while(1){ const char*bar=strchr(p,'|'); size_t len=bar?(size_t)(bar-p):strlen(p);
+                cue_addline(q,p,len); if(!bar) break; p=bar+1; }
+        }
+        free(s);
+    }
+    for(int i=first;i<out->n-1;i++) out->a[i].end=out->a[i+1].start;
+    lines_free(&L);
+}
+/* ASS/SSA: sekcja [Events], Format: mapuje kolumny, Dialogue: czasy + Text (ostatnie pole) */
+static long ass_ts(const char*s){ long h,m,sec,cs; if(sscanf(s,"%ld:%2ld:%2ld.%2ld",&h,&m,&sec,&cs)>=4) return (h*3600+m*60+sec)*1000+cs*10; return 0; }
+static void parse_ass(const char*text,Cues*out){
+    Lines L=split_lines(text); int in_events=0, idx_start=1, idx_end=2, idx_text=9;
+    for(int i=0;i<L.n;i++){ char*s=xmalloc(strlen(L.a[i])+1); strcpy(s,L.a[i]); strip_inplace(s);
+        if(s[0]=='['){ in_events = (strcasecmp(s,"[events]")==0); free(s); continue; }
+        if(!in_events || s[0]==0){ free(s); continue; }
+        if(!strncasecmp(s,"format:",7)){
+            /* policz indeksy start/end/text */ int col=0; idx_start=1;idx_end=2;idx_text=9; int ncol=0;
+            char*p=s+7; char*tok=strtok(p,","); while(tok){ while(*tok==' ')tok++;
+                if(!strcasecmp(tok,"start")) idx_start=col; else if(!strcasecmp(tok,"end")) idx_end=col; else if(!strcasecmp(tok,"text")) idx_text=col;
+                col++; ncol++; tok=strtok(NULL,","); }
+            if(idx_text>=ncol) idx_text=ncol-1;
+            free(s); continue;
+        }
+        if(!strncasecmp(s,"dialogue:",9)){
+            char*p=s+9; /* podziel na pola po przecinku, ale Text (idx_text) w całości */
+            char*fields[32]; int nf=0; char*cur=p;
+            for(char*q=p; nf<idx_text && *q; q++){ if(*q==','){ *q=0; fields[nf++]=cur; cur=q+1; } }
+            fields[nf++]=cur; /* reszta = Text */
+            if(nf>idx_text && idx_start<nf && idx_end<nf){
+                Cue*q=cues_push(out); q->start=ass_ts(fields[idx_start]); q->end=ass_ts(fields[idx_end]);
+                char*txt=xmalloc(strlen(fields[idx_text])+1); strcpy(txt,fields[idx_text]);
+                /* usuń {..}, zamień \N \n na nowe linie, \h na spację */
+                char*tmp=xmalloc(strlen(txt)*1+1); { char*o=tmp,*r=txt; while(*r){ if(*r=='{'){ char*e=strchr(r,'}'); if(e){ r=e+1; continue; } } *o++=*r++; } *o=0; }
+                /* split po \N / \n */ const char*r=tmp; while(1){ const char*br=NULL; for(const char*z=r; *z; z++){ if(z[0]=='\\'&&(z[1]=='N'||z[1]=='n')){ br=z; break; } }
+                    size_t len= br?(size_t)(br-r):strlen(r); char*seg=xmalloc(len+1); size_t o=0; for(size_t j=0;j<len;j++){ if(r[j]=='\\'&&j+1<len&&r[j+1]=='h'){ seg[o++]=' '; j++; } else seg[o++]=r[j]; } seg[o]=0;
+                    cue_addline(q,seg,strlen(seg)); free(seg); if(!br) break; r=br+2; }
+                free(tmp); free(txt);
+            }
+        }
+        free(s);
+    }
+    lines_free(&L);
+}
+
+/* wykrycie formatu — pełne (srt/microdvd/mpl2/tmplayer/vtt/ass) */
+static int contains_ci(const char*hay,const char*needle){ size_t n=strlen(needle); for(const char*p=hay;*p;p++){ if(!strncasecmp(p,needle,n)) return 1; } return 0; }
 static const char* detect_format(const char*text){
     const char*h=text; if((unsigned char)h[0]==0xef&&(unsigned char)h[1]==0xbb&&(unsigned char)h[2]==0xbf) h+=3;
     while(*h&&is_ascii_ws(*h)) h++;
     if(!strncasecmp(h,"WEBVTT",6)) return "vtt";
+    if(contains_ci(text,"[script info]")||contains_ci(text,"[v4+ styles]")||contains_ci(text,"[v4 styles]")
+       ||(contains_ci(text,"dialogue:")&&contains_ci(text,"[events]"))) return "ass";
     if(strstr(text,"-->")) return "srt";
-    /* pierwsza niepusta linia */
     const char*p=text; while(*p){ const char*nl=strchr(p,'\n'); size_t len=nl?(size_t)(nl-p):strlen(p);
-        char buf[8]={0}; size_t k=0; for(size_t j=0;j<len&&k<7;j++){ if(!is_ascii_ws(p[j])) buf[k++]=p[j]; }
-        if(k){ if(buf[0]=='{') return "microdvd"; break; }
+        /* pierwsza niepusta linia */ size_t j=0; while(j<len&&is_ascii_ws(p[j]))j++;
+        if(j<len){ char c=p[j];
+            if(c=='{') return "microdvd";
+            if(c=='['){ long a,b; if(sscanf(p+j,"[%ld][%ld]",&a,&b)==2) return "mpl2"; }
+            long H,M,S; char sp; if(sscanf(p+j,"%ld:%2ld:%2ld%c",&H,&M,&S,&sp)>=4&&(sp==':'||sp=='=')) return "tmplayer";
+            break; }
         if(!nl) break; p=nl+1; }
     return "srt";
 }
@@ -360,7 +446,10 @@ static const char* detect_format(const char*text){
 static void parse_any(const char*text,double fps,Cues*out){
     const char*fmt=detect_format(text);
     if(!strcmp(fmt,"microdvd")) parse_microdvd(text,fps,out);
+    else if(!strcmp(fmt,"mpl2")) parse_mpl2(text,out);
+    else if(!strcmp(fmt,"tmplayer")) parse_tmplayer(text,out);
     else if(!strcmp(fmt,"vtt")) parse_vtt(text,out);
+    else if(!strcmp(fmt,"ass")) parse_ass(text,out);
     else parse_srt(text,out);
 }
 
@@ -378,25 +467,29 @@ static void san_summary(const SanReport*r,SB*out){ int first=1;
     ADD(r->empty,"usunięto %d pustych",r->empty);
     #undef ADD
 }
-/* sanityzacja — dokładnie jak sanitize_cues (domyślne opcje) */
-static void sanitize(Cues*in,Cues*out,SanReport*rep){
+typedef struct { int enabled, keep_tags, strip_sdh; long max_display_ms, min_display_ms; } SanOpts;
+static const SanOpts SAN_DEFAULT = {1,0,0,MAX_DISPLAY_MS,0};
+
+/* sanityzacja — jak sanitize_cues (z opcjami) */
+static void sanitize(Cues*in,Cues*out,SanReport*rep,const SanOpts*o){
     memset(rep,0,sizeof *rep); cues_init(out);
     for(int i=0;i<in->n;i++){ Cue*c=&in->a[i];
-        Cue tmp; tmp.lines=NULL; tmp.nlines=0; int changed=0;
-        for(int k=0;k<c->nlines;k++){ char*s=xmalloc(strlen(c->lines[k])+1); strcpy(s,c->lines[k]); strip_format_tags(s);
-            if(strcmp(s,c->lines[k])!=0) changed=1;
+        Cue tmp; tmp.lines=NULL; tmp.nlines=0; int changed=0, sdh=0;
+        for(int k=0;k<c->nlines;k++){ char*s=xmalloc(strlen(c->lines[k])+1); strcpy(s,c->lines[k]);
+            if(!o->keep_tags){ strip_format_tags(s); if(strcmp(s,c->lines[k])!=0) changed=1; }
             tmp.lines=xrealloc(tmp.lines,(tmp.nlines+1)*sizeof(char*)); tmp.lines[tmp.nlines++]=s; }
         if(changed) rep->tags++;
-        /* trim + odrzuć puste */
+        if(o->strip_sdh){ int ch=0; for(int k=0;k<tmp.nlines;k++){ char*b=xmalloc(strlen(tmp.lines[k])+1); strcpy(b,tmp.lines[k]); strip_sdh_line(tmp.lines[k]); if(strcmp(b,tmp.lines[k])!=0) ch=1; free(b); } if(ch) rep->sdh++; }
         int keep=0; for(int k=0;k<tmp.nlines;k++){ strip_inplace(tmp.lines[k]); if(tmp.lines[k][0]!=0) tmp.lines[keep++]=tmp.lines[k]; else free(tmp.lines[k]); }
         tmp.nlines=keep;
         if(tmp.nlines==0){ free(tmp.lines); rep->empty++; continue; }
-        long start=c->start,end=c->end; if(end<=start){ end=start+1000; rep->nonpos++; }
+        long start=c->start,end=c->end; if(end<=start){ end=start+(o->min_display_ms?o->min_display_ms:1000); rep->nonpos++; }
         Cue*q=cues_push(out); q->start=start; q->end=end; q->lines=tmp.lines; q->nlines=tmp.nlines;
     }
     for(int i=0;i<out->n;i++){ Cue*c=&out->a[i]; long nxt = (i+1<out->n)? out->a[i+1].start : -1;
         if(nxt>=0 && c->end>nxt){ long v=c->start+1; c->end=(nxt>v)?nxt:v; rep->overlaps++; }
-        if(c->end-c->start>MAX_DISPLAY_MS){ c->end=c->start+MAX_DISPLAY_MS; rep->lng++; }
+        if(c->end-c->start>o->max_display_ms){ c->end=c->start+o->max_display_ms; rep->lng++; }
+        if(o->min_display_ms && c->end-c->start<o->min_display_ms){ long tgt=c->start+o->min_display_ms; if(nxt>=0&&tgt>nxt) tgt=nxt; if(tgt>c->end){ c->end=tgt; rep->shortx++; } }
     }
     rep->total=out->n;
 }
@@ -418,14 +511,74 @@ static void emit_srt(Cues*c,SB*out){
     free(body.b);
 }
 
-/* pełny pipeline: bajty -> SRT (rzuca błąd gdy 0 linii z niepustego wejścia) */
-static void convert_to_srt(const char*data,double fps,SB*out,SanReport*rep){
-    const char*p=data; if((unsigned char)p[0]==0xef&&(unsigned char)p[1]==0xbb&&(unsigned char)p[2]==0xbf) p+=3;
-    Cues raw; cues_init(&raw); parse_any(p,fps,&raw);
-    int nonws=0; for(const char*q=p;*q;q++) if(!is_ascii_ws(*q)){ nonws=1; break; }
+/* --- emittery formatów wyjściowych --- */
+static void ms_to_vtt(long ms,char out[16]){ char t[16]; ms_to_srt(ms,t); for(char*p=t;*p;p++) if(*p==',')*p='.'; strcpy(out,t); }
+static void ms_to_ass(long ms,char out[16]){ if(ms<0)ms=0; long h=ms/3600000; ms-=h*3600000; long m=ms/60000; ms-=m*60000; long s=ms/1000; long cs=(ms-s*1000)/10; snprintf(out,16,"%ld:%02ld:%02ld.%02ld",h,m,s,cs); }
+static void emit_join(SB*b,char**lines,int n,const char*sep){ for(int k=0;k<n;k++){ if(k)sb_puts(b,sep); sb_puts(b,lines[k]); } if(n==0) sb_puts(b,""); }
+static void cues_to_vtt(Cues*c,SB*out){ SB b; sb_init(&b); sb_puts(&b,"WEBVTT\n\n");
+    for(int i=0;i<c->n;i++){ char t1[16],t2[16]; ms_to_vtt(c->a[i].start,t1); ms_to_vtt(c->a[i].end,t2);
+        sb_puts(&b,t1); sb_puts(&b," --> "); sb_puts(&b,t2); sb_putc(&b,'\n');
+        for(int k=0;k<c->a[i].nlines;k++){ sb_puts(&b,c->a[i].lines[k]); sb_putc(&b,'\n'); } if(c->a[i].nlines==0) sb_putc(&b,'\n');
+        sb_putc(&b,'\n'); }
+    size_t s=0,e=b.len; while(s<e&&is_ascii_ws(b.b[s]))s++; while(e>s&&is_ascii_ws(b.b[e-1]))e--; sb_putn(out,b.b+s,e-s); sb_putc(out,'\n'); free(b.b); }
+static void cues_to_microdvd(Cues*c,double fps,SB*out){ for(int i=0;i<c->n;i++){ long sf=(long)(c->a[i].start*fps/1000.0+0.5), ef=(long)(c->a[i].end*fps/1000.0+0.5);
+        char h[32]; snprintf(h,sizeof h,"{%ld}{%ld}",sf,ef); sb_puts(out,h); emit_join(out,c->a[i].lines,c->a[i].nlines,"|"); sb_putc(out,'\n'); } }
+static const char*ASS_HEADER="[Script Info]\nScriptType: v4.00+\nCollisions: Normal\nPlayResX: 1920\nPlayResY: 1080\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,20,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
+static void cues_to_ass(Cues*c,SB*out){ sb_puts(out,ASS_HEADER); /* separatory jak "\n".join([HEADER,D1,...])+"\n" */
+    for(int i=0;i<c->n;i++){ char t1[16],t2[16]; ms_to_ass(c->a[i].start,t1); ms_to_ass(c->a[i].end,t2);
+        sb_putc(out,'\n'); sb_puts(out,"Dialogue: 0,"); sb_puts(out,t1); sb_putc(out,','); sb_puts(out,t2); sb_puts(out,",Default,,0,0,0,,"); emit_join(out,c->a[i].lines,c->a[i].nlines,"\\N"); }
+    sb_putc(out,'\n'); }
+static void emit_subtitle(Cues*c,const char*fmt,double fps,SB*out){
+    if(!strcmp(fmt,"srt")) emit_srt(c,out);
+    else if(!strcmp(fmt,"vtt")) cues_to_vtt(c,out);
+    else if(!strcmp(fmt,"ass")) cues_to_ass(c,out);
+    else if(!strcmp(fmt,"microdvd")) cues_to_microdvd(c,fps,out);
+    else die("Nieobsługiwany format wyjściowy");
+}
+static const char* fmt_from_ext(const char*out,const char*explicit_fmt){
+    if(explicit_fmt) return explicit_fmt;
+    const char*d=strrchr(out,'.'); if(!d) return "srt";
+    if(!strcasecmp(d,".vtt")) return "vtt"; if(!strcasecmp(d,".ass")||!strcasecmp(d,".ssa")) return "ass";
+    if(!strcasecmp(d,".sub")||!strcasecmp(d,".txt")) return "microdvd"; return "srt";
+}
+
+/* --- dekodowanie wejścia (UTF-8, inaczej cp1250) --- */
+static const uint16_t CP1250[128]={
+0x20AC,0x0081,0x201A,0x0083,0x201E,0x2026,0x2020,0x2021,0x0088,0x2030,0x0160,0x2039,0x015A,0x0164,0x017D,0x0179,
+0x0090,0x2018,0x2019,0x201C,0x201D,0x2022,0x2013,0x2014,0x0098,0x2122,0x0161,0x203A,0x015B,0x0165,0x017E,0x017A,
+0x00A0,0x02C7,0x02D8,0x0141,0x00A4,0x0104,0x00A6,0x00A7,0x00A8,0x00A9,0x015E,0x00AB,0x00AC,0x00AD,0x00AE,0x017B,
+0x00B0,0x00B1,0x02DB,0x0142,0x00B4,0x00B5,0x00B6,0x00B7,0x00B8,0x0105,0x015F,0x00BB,0x013D,0x02DD,0x013E,0x017C,
+0x0154,0x00C1,0x00C2,0x0102,0x00C4,0x0139,0x0106,0x00C7,0x010C,0x00C9,0x0118,0x00CB,0x011A,0x00CD,0x00CE,0x010E,
+0x0110,0x0143,0x0147,0x00D3,0x00D4,0x0150,0x00D6,0x00D7,0x0158,0x016E,0x00DA,0x0170,0x00DC,0x00DD,0x0162,0x00DF,
+0x0155,0x00E1,0x00E2,0x0103,0x00E4,0x013A,0x0107,0x00E7,0x010D,0x00E9,0x0119,0x00EB,0x011B,0x00ED,0x00EE,0x010F,
+0x0111,0x0144,0x0148,0x00F3,0x00F4,0x0151,0x00F6,0x00F7,0x0159,0x016F,0x00FA,0x0171,0x00FC,0x00FD,0x0163,0x02D9};
+static int is_utf8(const unsigned char*p,size_t n){ size_t i=0; while(i<n){ unsigned char c=p[i]; int e;
+    if(c<0x80) e=0; else if((c>>5)==0x6) e=1; else if((c>>4)==0xE) e=2; else if((c>>3)==0x1E) e=3; else return 0;
+    if(i+e>=n && e>0){ if(i+e>n-1+0 && (i+ (size_t)e)>=n) {} }
+    for(int k=1;k<=e;k++){ if(i+k>=n) return 0; if((p[i+k]&0xC0)!=0x80) return 0; } i+=e+1; } return 1; }
+static char* decode_text(const unsigned char*in,size_t n){
+    /* pomiń BOM */ if(n>=3&&in[0]==0xef&&in[1]==0xbb&&in[2]==0xbf){ in+=3; n-=3; }
+    if(is_utf8(in,n)){ char*d=xmalloc(n+1); memcpy(d,in,n); d[n]=0; return d; }
+    SB b; sb_init(&b); for(size_t i=0;i<n;i++){ unsigned char c=in[i];
+        uint32_t cp = (c<0x80)? c : CP1250[c-0x80];
+        if(cp<0x80) sb_putc(&b,(char)cp);
+        else if(cp<0x800){ sb_putc(&b,(char)(0xC0|(cp>>6))); sb_putc(&b,(char)(0x80|(cp&0x3F))); }
+        else { sb_putc(&b,(char)(0xE0|(cp>>12))); sb_putc(&b,(char)(0x80|((cp>>6)&0x3F))); sb_putc(&b,(char)(0x80|(cp&0x3F))); } }
+    return b.b;
+}
+
+/* pełny pipeline: bajty (dekodowane) -> format (rzuca błąd gdy 0 linii) */
+static void convert_bytes(const unsigned char*bytes,size_t nbytes,double fps,
+                          const char*outfmt,const SanOpts*opt,SB*out,SanReport*rep){
+    char*text=decode_text(bytes,nbytes);
+    Cues raw; cues_init(&raw); parse_any(text,fps,&raw);
+    int nonws=0; for(const char*q=text;*q;q++) if(!is_ascii_ws(*q)){ nonws=1; break; }
     if(raw.n==0 && nonws) die("Napisy wyglądają na uszkodzone lub w nierozpoznanym formacie (0 rozpoznanych linii) — nie zapisuję.");
-    Cues clean; sanitize(&raw,&clean,rep);
-    emit_srt(&clean,out);
+    memset(rep,0,sizeof *rep);
+    Cues*use=&raw, clean;
+    if(opt->enabled){ sanitize(&raw,&clean,rep,opt); use=&clean; } else { rep->total=raw.n; }
+    emit_subtitle(use,outfmt,fps,out);
+    free(text);
 }
 /* wypisz komunikat "Zapisano" + ew. "Korekty" (jak _save_subtitles) */
 static void print_saved(const char*outp,size_t bytes,const SanReport*rep){
@@ -514,35 +667,100 @@ static double resolve_fps(const char*movie,double server_fps,double flag_fps){
     if(flag_fps>0) return flag_fps;
     return DEFAULT_FPS;
 }
-static int cmd_convert(const char*in,const char*out,const char*movie,double flag_fps){
+#include <math.h>
+static long py_round(double x){ double f=floor(x); double d=x-f; if(d<0.5) return (long)f; if(d>0.5) return (long)f+1; long fl=(long)f; return (fl%2==0)?fl:fl+1; }
+static void apply_sync_c(Cues*in,double scale,long offset,Cues*out){ cues_init(out);
+    for(int i=0;i<in->n;i++){ Cue*c=&in->a[i]; long ns=py_round(c->start*scale+offset), ne=py_round(c->end*scale+offset);
+        if(ns<0)ns=0; if(ne<0)ne=0; Cue*q=cues_push(out); q->start=ns; q->end=ne;
+        for(int k=0;k<c->nlines;k++) cue_addline(q,c->lines[k],strlen(c->lines[k])); } }
+/* wczytaj + zdekoduj + sparsuj; błąd gdy 0 linii (jak _load_cues) */
+static void load_cues_c(const char*path,double fps,Cues*out){ size_t n; char*data=read_file(path,&n);
+    if(!data){ fprintf(stderr,"Brak pliku: %s\n",path); exit(1); }
+    char*text=decode_text((unsigned char*)data,n); free(data); cues_init(out); parse_any(text,fps,out); free(text);
+    if(out->n==0){ char m[512]; snprintf(m,sizeof m,"Nie rozpoznano napisów w pliku: %s",path); die(m); } }
+static long parse_user_time(const char*s){ /* hh:mm:ss[,.]mmm | mm:ss | sekundy */
+    while(*s==' ')s++; long h,m,sec,ms; char sep; int nn;
+    if(sscanf(s,"%ld:%2ld:%2ld%c%3ld",&h,&m,&sec,&sep,&ms)>=5&&(sep==','||sep=='.')) return ((h*3600+m*60+sec)*1000)+ms;
+    if(sscanf(s,"%ld:%2ld%n",&m,&sec,&nn)>=2 && s[nn]==0) return (m*60+sec)*1000;
+    char*end; double f=strtod(s,&end); if(end!=s&&*end==0) return (long)py_round(f*1000); return -1; }
+static const char* ext_for(const char*fmt){ if(!strcmp(fmt,"vtt"))return"vtt"; if(!strcmp(fmt,"ass"))return"ass"; if(!strcmp(fmt,"microdvd"))return"sub"; return"srt"; }
+
+static int cmd_convert(const char*in,const char*out,const char*movie,double flag_fps,const char*fmt_flag,SanOpts opt){
     size_t n; char*data=read_file(in,&n); if(!data){ fprintf(stderr,"Brak pliku: %s\n",in); return 1; }
     double fps=resolve_fps(movie,0,flag_fps);
-    SB srt; sb_init(&srt); SanReport rep; convert_to_srt(data,fps,&srt,&rep); free(data);
-    char*outp=default_out(in,out); write_file(outp,srt.b,srt.len);
-    print_saved(outp,srt.len,&rep);
-    free(outp); free(srt.b); return 0;
+    char*outp=default_out(in,out); const char*fmt=fmt_from_ext(outp,fmt_flag);
+    SB o; sb_init(&o); SanReport rep; convert_bytes((unsigned char*)data,n,fps,fmt,&opt,&o,&rep); free(data);
+    write_file(outp,o.b,o.len);
+    if(!strcmp(fmt,"srt")) print_saved(outp,o.len,&rep);
+    else printf("Zapisano: %s (%d linii, format %s)\n",outp,rep.total,fmt);
+    free(outp); free(o.b); return 0;
 }
-static int cmd_download(const char*movie,const char*lang,const char*out,double flag_fps){
+static int cmd_download(const char*movie,const char*lang,const char*out,double flag_fps,SanOpts opt){
     char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); return 1; }
     char L[8]; snprintf(L,sizeof L,"%s",lang?lang:"PL"); for(char*p=L;*p;p++)*p=toupper((unsigned char)*p);
     size_t dl; unsigned char*sub=np_download(md,L,&dl);
     if(!sub){ printf("Brak napisów dla: %s\n",movie); return 1; }
     double sfps=np_file_info_fps(md); double fps=resolve_fps(movie,sfps,flag_fps);
-    char*text=xmalloc(dl+1); memcpy(text,sub,dl); text[dl]=0; free(sub);
-    SB srt; sb_init(&srt); SanReport rep; convert_to_srt(text,fps,&srt,&rep); free(text);
-    char*outp=default_out(movie,out); write_file(outp,srt.b,srt.len);
-    print_saved(outp,srt.len,&rep);
-    free(outp); free(srt.b); return 0;
+    SB o; sb_init(&o); SanReport rep; convert_bytes(sub,dl,fps,"srt",&opt,&o,&rep); free(sub);
+    char*outp=default_out(movie,out); write_file(outp,o.b,o.len);
+    print_saved(outp,o.len,&rep);
+    free(outp); free(o.b); return 0;
+}
+static int cmd_fpsconv(const char*in,const char*out,double from_fps,double to_fps,const char*movie,const char*fmt_flag){
+    if(to_fps<=0 && movie){ double f=trusted_fps(fps_from_file(movie)); if(f) to_fps=f; }
+    if(from_fps<=0||to_fps<=0) die("Podaj --from ORAZ --to (albo --to przez --movie).");
+    Cues cues; load_cues_c(in,from_fps,&cues);
+    double scale=from_fps/to_fps; Cues conv; apply_sync_c(&cues,scale,0,&conv);
+    char defname[512]; char*outp; if(out){ outp=xmalloc(strlen(out)+1); strcpy(outp,out); }
+    else { const char*dot=strrchr(in,'.'); size_t b=dot?(size_t)(dot-in):strlen(in); snprintf(defname,sizeof defname,"%.*s.%gfps.srt",(int)b,in,to_fps); outp=xmalloc(strlen(defname)+1); strcpy(outp,defname); }
+    const char*fmt=fmt_from_ext(outp,fmt_flag); SB o; sb_init(&o); emit_subtitle(&conv,fmt,to_fps,&o); write_file(outp,o.b,o.len);
+    printf("Przeliczono FPS %g -> %g (scale=%.5f): %s (%d linii)\n",from_fps,to_fps,scale,outp,conv.n);
+    free(outp); free(o.b); return 0;
+}
+static int cmd_merge(char**files,int nfiles,const char*out,double flag_fps,const char*fmt_flag,double*offs,int noff){
+    if(nfiles<2) die("Podaj co najmniej 2 pliki do połączenia.");
+    double fps=flag_fps>0?flag_fps:DEFAULT_FPS;
+    Cues merged; load_cues_c(files[0],fps,&merged);
+    long running_end=0; for(int i=0;i<merged.n;i++) if(merged.a[i].end>running_end) running_end=merged.a[i].end;
+    for(int i=1;i<nfiles;i++){ Cues c; load_cues_c(files[i],fps,&c); long shift=(i-1<noff)?(long)py_round(offs[i-1]*1000):running_end;
+        Cues sh; apply_sync_c(&c,1.0,shift,&sh); for(int k=0;k<sh.n;k++){ Cue*q=cues_push(&merged); *q=sh.a[k]; if(q->end>running_end) running_end=q->end; } }
+    char defname[512]; char*outp; if(out){ outp=xmalloc(strlen(out)+1); strcpy(outp,out); }
+    else { const char*dot=strrchr(files[0],'.'); size_t b=dot?(size_t)(dot-files[0]):strlen(files[0]); snprintf(defname,sizeof defname,"%.*s.merged.srt",(int)b,files[0]); outp=xmalloc(strlen(defname)+1); strcpy(outp,defname); }
+    const char*fmt=fmt_from_ext(outp,fmt_flag); SB o; sb_init(&o); emit_subtitle(&merged,fmt,fps,&o); write_file(outp,o.b,o.len);
+    printf("Połączono %d plików → %s (%d linii, format %s)\n",nfiles,outp,merged.n,fmt);
+    free(outp); free(o.b); return 0;
+}
+static int cmd_split(const char*in,const char*out,char**at,int nat,int rebase,double flag_fps,const char*fmt_flag){
+    if(nat<1) die("Podaj co najmniej jeden --at.");
+    double fps=flag_fps>0?flag_fps:DEFAULT_FPS; Cues cues; load_cues_c(in,fps,&cues);
+    long pts[64]; int npts=0; for(int i=0;i<nat&&i<64;i++){ long v=parse_user_time(at[i]); if(v<0){ char m[256]; snprintf(m,sizeof m,"Zły format --at '%s' (użyj hh:mm:ss,mmm lub sekund)",at[i]); die(m);} pts[npts++]=v; }
+    for(int i=0;i<npts;i++) for(int j=i+1;j<npts;j++) if(pts[j]<pts[i]){ long t=pts[i];pts[i]=pts[j];pts[j]=t; }
+    const char*fmt=fmt_flag?fmt_flag:"srt"; const char*ext=ext_for(fmt);
+    char base[512]; if(out) snprintf(base,sizeof base,"%s",out); else { const char*dot=strrchr(in,'.'); size_t b=dot?(size_t)(dot-in):strlen(in); snprintf(base,sizeof base,"%.*s",(int)b,in); }
+    int nparts=npts+1; SB names; sb_init(&names); int wrote=0;
+    for(int p=0;p<nparts;p++){ Cues part; cues_init(&part);
+        for(int i=0;i<cues.n;i++){ int idx=0; for(int k=0;k<npts;k++) if(cues.a[i].start>=pts[k]) idx=k+1; if(idx==p){ Cue*q=cues_push(&part); q->start=cues.a[i].start; q->end=cues.a[i].end; for(int k=0;k<cues.a[i].nlines;k++) cue_addline(q,cues.a[i].lines[k],strlen(cues.a[i].lines[k])); } }
+        if(part.n==0) continue; long origin=(p>0)?pts[p-1]:0; Cues seg;
+        if(rebase&&p>0) apply_sync_c(&part,1.0,-origin,&seg); else seg=part;
+        char pth[600]; snprintf(pth,sizeof pth,"%s.part%d.%s",base,p+1,ext); SB o; sb_init(&o); emit_subtitle(&seg,fmt,fps,&o); write_file(pth,o.b,o.len); free(o.b);
+        if(wrote) sb_puts(&names,", "); sb_puts(&names,pth); wrote++; }
+    if(!wrote){ printf("Brak linii do zapisania.\n"); return 1; }
+    printf("Podzielono na: %s%s\n",names.b, rebase?"  (czasy części wyzerowane)":""); free(names.b); return 0;
 }
 
 static void usage(void){
-    printf("aqnapi %s (wersja C, POC)\n"
+    printf("aqnapi %s (wersja C)\n"
         "Użycie:\n"
         "  aqnapi hash PLIK\n"
         "  aqnapi fps PLIK\n"
-        "  aqnapi convert WEJŚCIE [-o WYJŚCIE] [--movie FILM] [--fps F]\n"
-        "  aqnapi download FILM [-l PL] [-o WYJŚCIE] [--fps F]\n"
-        "  aqnapi --version | --help\n", VERSION);
+        "  aqnapi convert WEJŚCIE [-o WYJ] [--format srt|vtt|ass|microdvd] [--movie FILM] [--fps F]\n"
+        "                 [--strip-sdh] [--keep-tags] [--no-sanitize] [--max-display S] [--min-display S]\n"
+        "  aqnapi fpsconv WEJŚCIE --from F [--to F | --movie FILM] [-o WYJ] [--format ...]\n"
+        "  aqnapi merge PLIK PLIK [...] [-o WYJ] [--offset S ...] [--format ...]\n"
+        "  aqnapi split WEJŚCIE --at CZAS [--at CZAS ...] [-o BAZA] [--no-rebase] [--format ...]\n"
+        "  aqnapi download FILM [-l PL] [-o WYJ] [--fps F]      (napiprojekt, HTTP)\n"
+        "  aqnapi --version | --help\n"
+        "POC w C: sieć/TLS (OpenSubtitles, napisy24 WWW), 7z-upload i sync — w wersji Python.\n", VERSION);
 }
 
 int main(int argc,char**argv){
@@ -551,19 +769,37 @@ int main(int argc,char**argv){
     if(!strcmp(cmd,"--version")){ printf("aqnapi %s\n",VERSION); return 0; }
     if(!strcmp(cmd,"--help")||!strcmp(cmd,"-h")){ usage(); return 0; }
 
-    /* proste parsowanie flag */
-    const char*pos=NULL,*out=NULL,*movie=NULL,*lang=NULL; double fps=0;
-    for(int i=2;i<argc;i++){
-        if(!strcmp(argv[i],"-o")||!strcmp(argv[i],"--output")){ if(++i<argc) out=argv[i]; }
-        else if(!strcmp(argv[i],"--movie")){ if(++i<argc) movie=argv[i]; }
-        else if(!strcmp(argv[i],"-l")||!strcmp(argv[i],"--lang")){ if(++i<argc) lang=argv[i]; }
-        else if(!strcmp(argv[i],"--fps")){ if(++i<argc) fps=atof(argv[i]); }
-        else if(argv[i][0]!='-' && !pos){ pos=argv[i]; }
+    const char*out=NULL,*movie=NULL,*lang=NULL,*fmt=NULL; double fps=0,from_fps=0,to_fps=0,maxd=0,mind=0;
+    int keep_tags=0,strip_sdh=0,no_san=0,rebase=1;
+    char*files[64]; int nfiles=0; double offs[32]; int noff=0; char*ats[64]; int nat=0;
+    for(int i=2;i<argc;i++){ const char*a=argv[i];
+        if(!strcmp(a,"-o")||!strcmp(a,"--output")){ if(++i<argc) out=argv[i]; }
+        else if(!strcmp(a,"--movie")){ if(++i<argc) movie=argv[i]; }
+        else if(!strcmp(a,"-l")||!strcmp(a,"--lang")){ if(++i<argc) lang=argv[i]; }
+        else if(!strcmp(a,"--format")){ if(++i<argc) fmt=argv[i]; }
+        else if(!strcmp(a,"--fps")){ if(++i<argc) fps=atof(argv[i]); }
+        else if(!strcmp(a,"--from")){ if(++i<argc) from_fps=atof(argv[i]); }
+        else if(!strcmp(a,"--to")){ if(++i<argc) to_fps=atof(argv[i]); }
+        else if(!strcmp(a,"--offset")){ if(++i<argc && noff<32) offs[noff++]=atof(argv[i]); }
+        else if(!strcmp(a,"--at")){ if(++i<argc && nat<64) ats[nat++]=argv[i]; }
+        else if(!strcmp(a,"--max-display")){ if(++i<argc) maxd=atof(argv[i]); }
+        else if(!strcmp(a,"--min-display")){ if(++i<argc) mind=atof(argv[i]); }
+        else if(!strcmp(a,"--keep-tags")) keep_tags=1;
+        else if(!strcmp(a,"--strip-sdh")) strip_sdh=1;
+        else if(!strcmp(a,"--no-sanitize")) no_san=1;
+        else if(!strcmp(a,"--no-rebase")) rebase=0;
+        else if(a[0]!='-'){ if(nfiles<64) files[nfiles++]=argv[i]; }
     }
+    const char*pos = nfiles>0? files[0] : NULL;
+    SanOpts opt=SAN_DEFAULT; opt.enabled=!no_san; opt.keep_tags=keep_tags; opt.strip_sdh=strip_sdh;
+    opt.max_display_ms=(long)((maxd>0?maxd:10.0)*1000); opt.min_display_ms=(long)((mind>0?mind:0)*1000);
 
     if(!strcmp(cmd,"hash")){ if(!pos){usage();return 2;} return cmd_hash(pos); }
     if(!strcmp(cmd,"fps")){ if(!pos){usage();return 2;} return cmd_fps(pos); }
-    if(!strcmp(cmd,"convert")){ if(!pos){usage();return 2;} return cmd_convert(pos,out,movie,fps); }
-    if(!strcmp(cmd,"download")){ if(!pos){usage();return 2;} return cmd_download(pos,lang,out,fps); }
+    if(!strcmp(cmd,"convert")){ if(!pos){usage();return 2;} return cmd_convert(pos,out,movie,fps,fmt,opt); }
+    if(!strcmp(cmd,"download")){ if(!pos){usage();return 2;} return cmd_download(pos,lang,out,fps,opt); }
+    if(!strcmp(cmd,"fpsconv")){ if(!pos){usage();return 2;} return cmd_fpsconv(pos,out,from_fps,to_fps,movie,fmt); }
+    if(!strcmp(cmd,"merge")){ return cmd_merge(files,nfiles,out,fps,fmt,offs,noff); }
+    if(!strcmp(cmd,"split")){ if(!pos){usage();return 2;} return cmd_split(pos,out,ats,nat,rebase,fps,fmt); }
     fprintf(stderr,"Nieznane polecenie: %s\n",cmd); usage(); return 2;
 }

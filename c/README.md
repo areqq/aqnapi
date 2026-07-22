@@ -8,19 +8,32 @@ To **proof of concept** obok wersji Python (`aqnapi.py`). Wersja Python pozostaj
 kompletna i referencyjna; wersja C ma być **maksymalnie zgodna bajtowo** w
 zakresie, który obejmuje.
 
-## Zakres POC
+## Zakres (stan bieżący)
 
-| Polecenie | C (POC) | Zgodność |
-|---|:---:|---|
-| `hash PLIK` | ✅ | bajtowo == `aqnapi hash` |
-| `fps PLIK` (MKV/AVI/MP4/MOV) | ✅ | bajtowo == `aqnapi fps` |
-| `convert IN [-o] [--fps] [--movie]` (SRT/MicroDVD/VTT) | ✅ | **plik i stdout** bajtowo == `aqnapi convert` (z pełną sanityzacją: tagi, docinanie długich, nakładki, złe czasy, puste) |
-| `download FILM [-l] [-o] [--fps]` (napiprojekt `mode=1`, HTTP) | ✅ | ścieżka HTTP + base64 + pipeline; komunikaty == `aqnapi napiprojekt download` |
+**Zaimplementowane w C i zweryfikowane bajtowo z wersją Python:**
 
-**Poza zakresem POC** (pozostaje w Pythonie): OpenSubtitles i logowanie WWW
-napisy24 (TLS), pobieranie ZIP z napisy24, upload 7z-AES, `sync` (curses),
-`merge`/`split`/`config`, formaty ASS/MPL2/TMPlayer, transkodowanie
-cp1250/iso-8859-2 (POC zakłada wejście UTF-8).
+| Polecenie | Zgodność |
+|---|---|
+| `hash PLIK` | bajtowo == `aqnapi hash` |
+| `fps PLIK` (MKV/AVI/MP4/MOV) | bajtowo == `aqnapi fps` |
+| `convert` — **wszystkie formaty wejścia** (SRT/MicroDVD/MPL2/TMPlayer/VTT/ASS) | **plik + stdout** bajtowo == `aqnapi convert` |
+| `convert --format srt\|vtt\|ass\|microdvd` (eksport) | bajtowo |
+| flagi: `--strip-sdh --keep-tags --no-sanitize --max-display --min-display` | bajtowo |
+| dekodowanie wejścia **cp1250** (nie-UTF-8) | bajtowo (Polski) |
+| pełna **sanityzacja** (tagi, długie, nakładki, złe/puste czasy) + raport „Korekty" | bajtowo |
+| `fpsconv --from --to [--movie]` | bajtowo (z bankierskim zaokrągleniem) |
+| `merge` (auto/`--offset`) | bajtowo |
+| `split --at [--no-rebase]` | bajtowo |
+| `download FILM` (napiprojekt `mode=1`, HTTP+base64) | ścieżka HTTP + pipeline; komunikaty == `aqnapi napiprojekt download` |
+
+**Jeszcze nie w C** (kolejne etapy): plain-HTTP klienci napiprojekt
+(search/account/associate/fileinfo) i napisy24 (webapi search, CheckSubAgent+ZIP);
+`get` (agregator); upload 7z-AES do napiprojekt; `config`; `sync` (termios TUI).
+**Wymaga TLS (osobny etap: vendorowanie BearSSL + certyfikaty):** OpenSubtitles
+(search/download/login) oraz logowanie/upload/delete WWW napisy24.
+
+> `iso-8859-2` jako drugorzędny fallback kodowania oraz kilka rzadkich, niezdefiniowanych
+> bajtów cp1250 są uproszczone względem Pythona (nie dotyczy typowych polskich napisów).
 
 ## Budowanie
 
