@@ -1,0 +1,5 @@
+# artefakty budowania wersji uniwersalnej (Cosmopolitan)
+/dist/
+/cosmo/python.ape
+__pycache__/
+*.pyc
