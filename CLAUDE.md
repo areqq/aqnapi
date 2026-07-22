@@ -102,6 +102,12 @@ wektor AES-256 z FIPS-197). Nie dodawaj testów sieciowych do domyślnego biegu.
 100% zgodności — `aqnapi.py` jest jedynym źródłem prawdy; wersja APE to tylko
 opakowanie. **Nie przepisuj w C** (dryf zachowań łamie wymóg 100% zgodności).
 
+Niezależny **natywny POC w C**: `c/aqnapi.c` + `c/build.sh` (cosmocc → `dist/
+aqnapi-c.com`). Podzbiór (`hash`/`fps`/`convert`/`download` przez napiprojekt
+HTTP) **bajtowo zgodny** z Pythonem — przy zmianach w `aqnapi.py` dotyczących
+tych poleceń pilnuj parności (`diff` wyjść). Reszta (TLS/ZIP/7z/curses) świadomie
+poza POC. C ma własne MD5/OSH/FPS/base64/HTTP/silnik napisów.
+
 Krytyczne dla zgodności z APE: nie wprowadzaj zależności od **`lzma`** ani
 **`ctypes`** — te moduły nie są wkompilowane w APE Pythona (reszta stdlib, w tym
 `ssl`/HTTPS z wbudowanymi certyfikatami, `curses`, `termios`, działa). 7z-AES
