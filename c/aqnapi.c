@@ -944,6 +944,75 @@ static int cmd_config(const char*sub,const char*ov){
     fprintf(stderr,"config: użyj init | show | path\n"); return 2;
 }
 
+/* ---------------------------------------------------------------- wyszukiwanie */
+static char* xml_first(const char*hay,const char*tag){ char op[48],cl[48]; snprintf(op,sizeof op,"<%s>",tag); snprintf(cl,sizeof cl,"</%s>",tag);
+    const char*s=strstr(hay,op); if(!s){ char*e=xmalloc(1); e[0]=0; return e; } s+=strlen(op); const char*e=strstr(s,cl); if(!e){ char*x=xmalloc(1); x[0]=0; return x; }
+    size_t n=e-s; char*o=xmalloc(n+1); memcpy(o,s,n); o[n]=0; strip_inplace(o); return o; }
+static void norm_imdb(const char*in,char*out,size_t osz){ char dig[32]; int k=0; for(const char*p=in;*p&&k<31;p++) if(isdigit((unsigned char)*p)) dig[k++]=*p; dig[k]=0;
+    if(k==0){ snprintf(out,osz,"%s",in); return; } char z[8]=""; int pad=7-k; for(int i=0;i<pad&&i<7;i++) z[i]='0'; z[pad>0?pad:0]=0; snprintf(out,osz,"tt%s%s",z,dig); }
+static void extract_tt(const char*s,char*out,size_t osz){ out[0]=0; /* znajdź "tt" po którym są cyfry (jak regex tt\d+) */
+    for(const char*p=strstr(s,"tt"); p; p=strstr(p+1,"tt")){ if(isdigit((unsigned char)p[2])){ size_t i=0; out[i++]='t'; out[i++]='t'; const char*q=p+2; while(*q&&isdigit((unsigned char)*q)&&i<osz-1) out[i++]=*q++; out[i]=0; return; } } }
+static void print_hits_header(void){ printf("%-13s %-12s ","SERWIS","ID"); fputs("JĘZYK  ",stdout); printf("%6s  TYTUŁ / RELEASE\n","POB."); for(int i=0;i<78;i++)putchar('-'); putchar('\n'); }
+static void print_hit(const char*svc,const char*id,const char*lang,int dls,const char*title,const char*year,const char*release){
+    SB t; sb_init(&t); sb_puts(&t,title); if(year&&year[0]){ char y[32]; snprintf(y,sizeof y," (%s)",year); sb_puts(&t,y); }
+    if(release&&release[0]){ char r[80]; snprintf(r,sizeof r,"  [%.32s]",release); sb_puts(&t,r); }
+    if(t.len>60) t.b[60]=0; printf("%-13s %-12s %-6s %6d  %s\n",svc,id,lang,dls,t.b); free(t.b); }
+typedef struct { char service[16],id[48],lang[8],title[256],year[16],release[160]; } Hit;
+typedef struct { Hit*a; int n,cap; } Hits;
+static Hit* hits_push(Hits*h){ if(h->n==h->cap){ h->cap=h->cap?h->cap*2:16; h->a=xrealloc(h->a,h->cap*sizeof(Hit)); } Hit*x=&h->a[h->n++]; memset(x,0,sizeof *x); return x; }
+static void n24_collect(Hits*hits,const char*imdb,const char*title){
+    char path[600]; if(imdb&&imdb[0]){ char nb[16]; norm_imdb(imdb,nb,sizeof nb); char*e=url_encode(nb); snprintf(path,sizeof path,"/libs/webapi.php?imdb=%s",e); free(e); }
+    else { char*e=url_encode(title?title:""); snprintf(path,sizeof path,"/libs/webapi.php?title=%s",e); free(e); }
+    size_t bl; char*body=http_get_url("napisy24.pl",path,&bl); if(!body) return; const char*p=body;
+    while((p=strstr(p,"<subtitle>"))){ const char*end=strstr(p,"</subtitle>"); if(!end) break;
+        size_t blen=end-p; char*blk=xmalloc(blen+1); memcpy(blk,p,blen); blk[blen]=0;
+        char*id=xml_first(blk,"id"),*t=xml_first(blk,"title"),*alt=xml_first(blk,"altTitle"),*yr=xml_first(blk,"year"),*lg=xml_first(blk,"language"),*rel=xml_first(blk,"release");
+        Hit*x=hits_push(hits); snprintf(x->service,16,"napisy24"); snprintf(x->id,48,"%s",id); snprintf(x->lang,8,"%s",lg);
+        snprintf(x->title,256,"%s",t[0]?t:alt); snprintf(x->year,16,"%s",yr); snprintf(x->release,160,"%s",rel);
+        free(id);free(t);free(alt);free(yr);free(lg);free(rel);free(blk); p=end+11; }
+    free(body);
+}
+static void np_collect(Hits*hits,const char*title){
+    char*e=url_encode(title?title:""); char path[600]; snprintf(path,sizeof path,"/api/api-movie-search.php?mode=get&client=allplayer&search=%s",e); free(e);
+    size_t bl; char*body=http_get_url("napiprojekt.pl",path,&bl); if(!body) return; const char*p=body;
+    while((p=strstr(p,"<movie>"))){ const char*end=strstr(p,"</movie>"); if(!end) break;
+        size_t blen=end-p; char*blk=xmalloc(blen+1); memcpy(blk,p,blen); blk[blen]=0;
+        char*mid=xml_first(blk,"id"),*po=xml_first(blk,"polish"),*orig=xml_first(blk,"original"),*yr=xml_first(blk,"year");
+        Hit*x=hits_push(hits); snprintf(x->service,16,"napiprojekt"); snprintf(x->id,48,"%s",mid);
+        snprintf(x->title,256,"%s",orig[0]?orig:po); snprintf(x->year,16,"%s",yr);
+        free(mid);free(po);free(orig);free(yr);free(blk); p=end+8; }
+    free(body);
+}
+static int lang_ok(const char*hl,const char*want){ if(!want||!want[0]) return 1; if(!hl[0]) return 1; char h[8]; snprintf(h,sizeof h,"%s",hl); for(char*p=h;*p;p++)*p=tolower((unsigned char)*p);
+    char w[64]; snprintf(w,sizeof w,"%s",want); for(char*t=strtok(w,",");t;t=strtok(NULL,",")){ char lw[16]; snprintf(lw,sizeof lw,"%s",t); for(char*p=lw;*p;p++)*p=tolower((unsigned char)*p); if(!strcmp(h,lw)) return 1; } return 0; }
+static int print_hits_table(Hits*hits,const char*langf){ int any=0;
+    for(int i=0;i<hits->n;i++){ if(!lang_ok(hits->a[i].lang,langf)) continue; if(!any){ print_hits_header(); any=1; }
+        print_hit(hits->a[i].service,hits->a[i].id,hits->a[i].lang,0,hits->a[i].title,hits->a[i].year,hits->a[i].release); }
+    if(!any){ printf("Brak wyników.\n"); return 1; }
+    printf("\nPobierz: aqnapi <serwis> download/getid/download-id <ID>\n"); return 0;
+}
+static int n24_search(const char*imdb,const char*title){ Hits h={0}; n24_collect(&h,imdb,title); return print_hits_table(&h,NULL); }
+static int cmd_search(const char*imdb,const char*title,const char*query,const char*lang){
+    Hits h={0}; if(imdb||title) n24_collect(&h,imdb?imdb:"",title?title:"");
+    if(title||query) np_collect(&h,title?title:(query?query:""));
+    /* OpenSubtitles wymaga TLS+klucza (poza wersją C) — jak Python bez klucza */
+    fprintf(stderr,"WARNING: opensubtitles search: OpenSubtitles wymaga klucza API (Api-Key)\n");
+    return print_hits_table(&h,lang&&lang[0]?lang:"pl");
+}
+static int np_search(const char*title){
+    char*e=url_encode(title?title:""); char path[600]; snprintf(path,sizeof path,"/api/api-movie-search.php?mode=get&client=allplayer&search=%s",e); free(e);
+    size_t bl; char*body=http_get_url("napiprojekt.pl",path,&bl); if(!body) die("napiprojekt: błąd połączenia");
+    const char*p=body; int any=0;
+    while((p=strstr(p,"<movie>"))){ const char*end=strstr(p,"</movie>"); if(!end) break;
+        size_t blen=end-p; char*blk=xmalloc(blen+1); memcpy(blk,p,blen); blk[blen]=0;
+        char*mid=xml_first(blk,"id"),*po=xml_first(blk,"polish"),*orig=xml_first(blk,"original"),*yr=xml_first(blk,"year"),*imdb=xml_first(blk,"imdb_com");
+        char tt[16]; extract_tt(imdb,tt,sizeof tt);
+        printf("MovieId: %s\n",mid); printf("  %s (%s)  PL: %s\n",orig,yr,po); printf("  IMDB: %s   %s\n",tt,imdb);
+        any=1; free(mid);free(po);free(orig);free(yr);free(imdb);free(blk); p=end+8; }
+    free(body); if(!any){ printf("Brak wyników.\n"); return 1; }
+    return 0;
+}
+
 static void usage(void){
     printf("aqnapi %s (wersja C)\n"
         "Użycie:\n"
@@ -960,7 +1029,7 @@ static void usage(void){
 }
 
 int main(int argc,char**argv){
-    const char*cmd=NULL,*out=NULL,*movie=NULL,*lang=NULL,*fmt=NULL,*cfgpath=NULL;
+    const char*cmd=NULL,*out=NULL,*movie=NULL,*lang=NULL,*fmt=NULL,*cfgpath=NULL,*title=NULL,*imdb=NULL,*query=NULL;
     double fps=0,from_fps=0,to_fps=0,maxd=0,mind=0;
     int keep_tags=0,strip_sdh=0,no_san=0,rebase=1;
     char*files[64]; int nfiles=0; double offs[32]; int noff=0; char*ats[64]; int nat=0; char*anch[64]; int nanch=0;
@@ -973,6 +1042,9 @@ int main(int argc,char**argv){
         else if(!strcmp(a,"-l")||!strcmp(a,"--lang")){ if(++i<argc) lang=argv[i]; }
         else if(!strcmp(a,"--format")){ if(++i<argc) fmt=argv[i]; }
         else if(!strcmp(a,"--config")){ if(++i<argc) cfgpath=argv[i]; }
+        else if(!strcmp(a,"--title")){ if(++i<argc) title=argv[i]; }
+        else if(!strcmp(a,"--imdb")){ if(++i<argc) imdb=argv[i]; }
+        else if(!strcmp(a,"--query")){ if(++i<argc) query=argv[i]; }
         else if(!strcmp(a,"--fps")){ if(++i<argc) fps=atof(argv[i]); }
         else if(!strcmp(a,"--from")){ if(++i<argc) from_fps=atof(argv[i]); }
         else if(!strcmp(a,"--to")){ if(++i<argc) to_fps=atof(argv[i]); }
@@ -1002,14 +1074,17 @@ int main(int argc,char**argv){
     if(!strcmp(cmd,"config")){ return cmd_config(pos?pos:"show",cfgpath); }
     if(!strcmp(cmd,"sync")){ return cmd_sync(nfiles>0?files[0]:NULL, nfiles>1?files[1]:NULL, out, noff>0?offs[0]:0, noff>0, anch, nanch, fps); }
     if(!strcmp(cmd,"get")){ if(!pos){usage();return 2;} return cmd_get(pos,lang,out,fps,opt); }
+    if(!strcmp(cmd,"search")){ return cmd_search(imdb,title,query,lang); }
     if(!strcmp(cmd,"napiprojekt")||!strcmp(cmd,"np")){ const char*sub=nfiles>0?files[0]:NULL,*a1=nfiles>1?files[1]:NULL; if(!sub){usage();return 2;}
         if(!strcmp(sub,"download")){ if(!a1){usage();return 2;} return cmd_download(a1,lang,out,fps,opt); }
         if(!strcmp(sub,"fileinfo")){ if(!a1){usage();return 2;} return cmd_np_fileinfo(a1); }
+        if(!strcmp(sub,"search")){ const char*t=a1?a1:(title?title:query); if(!t){usage();return 2;} return np_search(t); }
         fprintf(stderr,"napiprojekt: '%s' nieobsługiwane w wersji C (użyj aqnapi.py)\n",sub); return 2; }
     if(!strcmp(cmd,"napisy24")||!strcmp(cmd,"n24")){ const char*sub=nfiles>0?files[0]:NULL,*a1=nfiles>1?files[1]:NULL; if(!sub){usage();return 2;}
         if(!strcmp(sub,"hash")){ if(!a1){usage();return 2;} return cmd_hash(a1); }
         if(!strcmp(sub,"getid")){ if(!a1){usage();return 2;} return cmd_n24_getid(a1,out,movie,fps,opt); }
         if(!strcmp(sub,"download")){ if(!a1){usage();return 2;} return cmd_n24_download(a1,lang,out,fps,opt); }
+        if(!strcmp(sub,"search")){ return n24_search(imdb,title); }
         fprintf(stderr,"napisy24: '%s' nieobsługiwane w wersji C (użyj aqnapi.py)\n",sub); return 2; }
     if(!strcmp(cmd,"opensubtitles")||!strcmp(cmd,"os")){ fprintf(stderr,"opensubtitles: wymaga TLS — użyj wersji Python (aqnapi.py)\n"); return 2; }
     fprintf(stderr,"Nieznane polecenie: %s\n",cmd); usage(); return 2;
