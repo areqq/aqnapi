@@ -24,7 +24,7 @@
 #include <unistd.h>
 #include "third_party/zlib/zlib.h"
 
-#define VERSION "1.0.1"
+#define VERSION "1.0.2"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
@@ -1170,6 +1170,7 @@ static int cmd_np_upload(const char*movie,const char*srt,const char*lang,const c
 #include "third_party/mbedtls/net_sockets.h"
 #include "third_party/mbedtls/entropy.h"
 #include "third_party/mbedtls/ctr_drbg.h"
+#include "third_party/mbedtls/x509_crt.h"
 
 /* GET/POST po HTTPS; obsługa chunked i przekierowań. Zwraca ciało (malloc). */
 static char* https_fetch(const char*method,const char*host,const char*path,
@@ -1183,7 +1184,13 @@ static char* https_fetch(const char*method,const char*host,const char*path,
     if(mbedtls_ctr_drbg_seed(&drbg,mbedtls_entropy_func,&ent,(const unsigned char*)"aqnapi",6)) goto done;
     if(mbedtls_net_connect(&net,host,"443",MBEDTLS_NET_PROTO_TCP)) goto done;
     if(mbedtls_ssl_config_defaults(&conf,MBEDTLS_SSL_IS_CLIENT,MBEDTLS_SSL_TRANSPORT_STREAM,MBEDTLS_SSL_PRESET_DEFAULT)) goto done;
-    mbedtls_ssl_conf_authmode(&conf,MBEDTLS_SSL_VERIFY_NONE);
+    { /* weryfikacja CA: wbudowany bundle /zip/cacert.pem (fallback: systemowy; ostatecznie brak) */
+      static mbedtls_x509_crt CA; static int ca_state=0; /* 0=nieładowane 1=ok 2=brak */
+      if(ca_state==0){ mbedtls_x509_crt_init(&CA); size_t cl; char*cb=read_file("/zip/cacert.pem",&cl);
+          if(!cb) cb=read_file("/etc/ssl/certs/ca-certificates.crt",&cl);
+          if(cb && mbedtls_x509_crt_parse(&CA,(const unsigned char*)cb,cl+1)>=0) ca_state=1; else ca_state=2; free(cb); }
+      if(ca_state==1){ mbedtls_ssl_conf_ca_chain(&conf,&CA,NULL); mbedtls_ssl_conf_authmode(&conf,MBEDTLS_SSL_VERIFY_REQUIRED); }
+      else mbedtls_ssl_conf_authmode(&conf,MBEDTLS_SSL_VERIFY_NONE); }
     mbedtls_ssl_conf_rng(&conf,mbedtls_ctr_drbg_random,&drbg);
     if(mbedtls_ssl_setup(&ssl,&conf)) goto done;
     mbedtls_ssl_set_hostname(&ssl,host);
