@@ -35,15 +35,26 @@ zakresie, który obejmuje.
 Własna kryptografia zweryfikowana: **AES-256 (wektor FIPS-197)**, **SHA-256**,
 oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`).
 
-**Jeszcze nie w C** (kolejne etapy): napiprojekt `account`/`associate`, napisy24
-`login`/`imdb` (HTTP z poświadczeniami); **interaktywny `sync`** (termios TUI).
+| `update [--check]` | **wariant TLS** (`c/build-tls.sh`): HTTPS do GitHub API przez mbedtls, porównanie wersji, podmiana binarki. `--check` zweryfikowany na żywo (v1.0.0 == najnowsza) |
 
-**TLS — droga potwierdzona (PoC, jak redbean):** zamiast vendorowania BearSSL,
-buduje się w monorepo Cosmopolitan i linkuje `third_party/mbedtls`. Zweryfikowano
-na żywo klienta HTTPS w APE: **TLS 1.2 do `api.opensubtitles.com` (403 bez
-klucza) i `napisy24.pl` (200)**. Szczegóły i przepis: [`c/tls/`](tls/). Pozostaje
-integracja pełnych klientów OpenSubtitles (REST/JWT/JSON) i WWW napisy24 na tym
-fundamencie (OpenSubtitles wymaga do weryfikacji klucza API użytkownika).
+## Dwa warianty binarki C
+
+- **`dist/aqnapi-c.com`** — build `cosmocc` (`c/build.sh`), lekki, **bez TLS**.
+  `update`/`opensubtitles` wypisują, że wymagają wariantu TLS.
+- **`dist/aqnapi-c-tls.com`** — build monorepo + `third_party/mbedtls`
+  (`c/build-tls.sh`), **z TLS**. Ma działające `update` (HTTPS). Kod TLS jest pod
+  `#ifdef AQNAPI_TLS` (włączany flagą `-DAQNAPI_TLS` w buildzie monorepo).
+
+**TLS — jak redbean:** monorepo Cosmopolitan + `third_party/mbedtls` (MbedTLS
+2.26). Zweryfikowano na żywo: handshake TLS 1.2 i pełny HTTPS do
+`api.opensubtitles.com`/`api.github.com`/`napisy24.pl`. Szczegóły/PoC: [`tls/`](tls/).
+
+**Jeszcze nie w C** (kolejne etapy): pełny klient **OpenSubtitles** (login→JWT,
+search, download — fundament `https_fetch`+`json_str` już jest, brakuje parsera
+JSON wyników + weryfikacji CA) i **WWW napisy24** (login/upload/delete);
+napiprojekt `account`/`associate`, napisy24 `login`/`imdb`; **interaktywny
+`sync`** (termios TUI). Do dystrybucji samo-aktualizacji: dodać `aqnapi-c.com`
+jako artefakt wydania (obecnie release publikuje tylko wersję Python-APE).
 
 > `iso-8859-2` jako drugorzędny fallback kodowania oraz kilka rzadkich, niezdefiniowanych
 > bajtów cp1250 są uproszczone względem Pythona (nie dotyczy typowych polskich napisów).
