@@ -1092,7 +1092,7 @@ static void print_hit(const char*svc,const char*id,const char*lang,int dls,const
     SB t; sb_init(&t); sb_puts(&t,title); if(year&&year[0]){ char y[32]; snprintf(y,sizeof y," (%s)",year); sb_puts(&t,y); }
     if(release&&release[0]){ char r[80]; snprintf(r,sizeof r,"  [%.32s]",release); sb_puts(&t,r); }
     if(t.len>60) t.b[60]=0; printf("%-13s %-12s %-6s %6d  %s\n",svc,id,lang,dls,t.b); free(t.b); }
-typedef struct { char service[16],id[48],lang[8],title[256],year[16],release[160]; } Hit;
+typedef struct { char service[16],id[48],lang[8],title[256],year[16],release[160]; int dls; } Hit;
 typedef struct { Hit*a; int n,cap; } Hits;
 static Hit* hits_push(Hits*h){ if(h->n==h->cap){ h->cap=h->cap?h->cap*2:16; h->a=xrealloc(h->a,h->cap*sizeof(Hit)); } Hit*x=&h->a[h->n++]; memset(x,0,sizeof *x); return x; }
 static void n24_collect(Hits*hits,const char*imdb,const char*title){
@@ -1190,7 +1190,7 @@ static char* https_fetch(const char*method,const char*host,const char*path,
     mbedtls_ssl_set_bio(&ssl,&net,mbedtls_net_send,mbedtls_net_recv,NULL);
     while((r=mbedtls_ssl_handshake(&ssl))!=0){ if(r!=MBEDTLS_ERR_SSL_WANT_READ&&r!=MBEDTLS_ERR_SSL_WANT_WRITE) goto done; }
     { SB req; sb_init(&req); char h[1400];
-      snprintf(h,sizeof h,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: aqnapi-c/%s\r\nAccept: */*\r\n",method,path,host,VERSION);
+      snprintf(h,sizeof h,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: aqnapi v%s\r\n",method,path,host,VERSION);
       sb_puts(&req,h); if(extra_hdrs) sb_puts(&req,extra_hdrs);
       if(post){ char cl[64]; snprintf(cl,sizeof cl,"Content-Type: application/json\r\nContent-Length: %zu\r\n",strlen(post)); sb_puts(&req,cl); }
       sb_puts(&req,"Connection: close\r\n\r\n"); if(post) sb_puts(&req,post);
@@ -1205,9 +1205,11 @@ static char* https_fetch(const char*method,const char*host,const char*path,
       if(st>=300&&st<400){ /* przekierowanie */
           char*loc=NULL; for(char*p=hdrs;*p;p++) if((p==hdrs||p[-1]=='\n')&&!strncasecmp(p,"location:",9)){ loc=p+9; break; }
           if(loc){ while(*loc==' ')loc++; char url[1024]; size_t i=0; while(loc[i]&&loc[i]!='\r'&&loc[i]!='\n'&&i<sizeof url-1){ url[i]=loc[i]; i++; } url[i]=0;
-              char nh[256],np2[1024]; const char*u=url; if(!strncmp(u,"https://",8))u+=8; else if(!strncmp(u,"http://",7))u+=7;
-              const char*sl=strchr(u,'/'); if(sl){ size_t hl=sl-u; if(hl>=sizeof nh)hl=sizeof nh-1; memcpy(nh,u,hl); nh[hl]=0; snprintf(np2,sizeof np2,"%s",sl); }
-              else { snprintf(nh,sizeof nh,"%s",u); strcpy(np2,"/"); }
+              char nh[256],np2[1024];
+              if(url[0]=='/'){ /* względny -> ten sam host */ snprintf(nh,sizeof nh,"%s",host); snprintf(np2,sizeof np2,"%s",url); }
+              else { const char*u=url; if(!strncmp(u,"https://",8))u+=8; else if(!strncmp(u,"http://",7))u+=7;
+                  const char*sl=strchr(u,'/'); if(sl){ size_t hl=sl-u; if(hl>=sizeof nh)hl=sizeof nh-1; memcpy(nh,u,hl); nh[hl]=0; snprintf(np2,sizeof np2,"%s",sl); }
+                  else { snprintf(nh,sizeof nh,"%s",u); strcpy(np2,"/"); } }
               free(resp.b);
               /* zwolnij TLS przed rekurencją */ mbedtls_ssl_close_notify(&ssl); mbedtls_ssl_free(&ssl); mbedtls_ssl_config_free(&conf); mbedtls_net_free(&net); mbedtls_ctr_drbg_free(&drbg); mbedtls_entropy_free(&ent);
               return https_fetch("GET",nh,np2,extra_hdrs,NULL,status,outlen,depth+1); }
@@ -1225,6 +1227,82 @@ done:
 static int json_str(const char*j,const char*key,char*out,size_t osz){ char pat[64]; snprintf(pat,sizeof pat,"\"%s\"",key);
     const char*p=strstr(j,pat); if(!p){ out[0]=0; return 0; } p+=strlen(pat); while(*p&&*p!=':')p++; if(*p)p++; while(*p==' '||*p=='"')p++;
     size_t i=0; while(*p&&*p!='"'&&i<osz-1){ if(*p=='\\'&&p[1]){p++;} out[i++]=*p++; } out[i]=0; return i>0; }
+static long json_num(const char*j,const char*key){ char pat[64]; snprintf(pat,sizeof pat,"\"%s\"",key);
+    const char*p=strstr(j,pat); if(!p) return -1; p+=strlen(pat); while(*p&&*p!=':')p++; if(*p)p++; while(*p==' ')p++; return strtol(p,NULL,10); }
+
+/* --- OpenSubtitles (REST v1 po TLS) --- */
+static const char* OS_HOST="api.opensubtitles.com";
+static void os_creds(const char*cfgpath,char*key,char*user,char*pass){
+    Ini ini; ini_load(config_path(cfgpath),&ini);
+    const char*k=ini_get(&ini,2,"api_key"); const char*u=ini_get(&ini,2,"username"); const char*p=ini_get(&ini,2,"password");
+    const char*ek=getenv("OS_API_KEY"),*eu=getenv("OS_USERNAME"),*ep=getenv("OS_PASSWORD");
+    snprintf(key,128,"%s",ek&&*ek?ek:k); snprintf(user,128,"%s",eu&&*eu?eu:u); snprintf(pass,128,"%s",ep&&*ep?ep:p);
+}
+static char* os_hdrs(const char*key,const char*bearer){ SB h; sb_init(&h); char t[400];
+    /* User-Agent dostarcza https_fetch (bazowo "aqnapi v<wersja>") — bez duplikatu */
+    snprintf(t,sizeof t,"Api-Key: %s\r\nAccept: application/json\r\n",key); sb_puts(&h,t);
+    if(bearer&&bearer[0]){ snprintf(t,sizeof t,"Authorization: Bearer %s\r\n",bearer); sb_puts(&h,t); } return h.b; }
+/* login -> token (i host bazowy). Zwraca 1 przy sukcesie. */
+static int os_login(const char*cfgpath,char token[2048],char host[256]){
+    char key[128],user[128],pass[128]; os_creds(cfgpath,key,user,pass);
+    if(!key[0]){ fprintf(stderr,"Błąd uwierzytelnienia: OpenSubtitles wymaga klucza API (Api-Key)\n"); return 0; }
+    if(!user[0]||!pass[0]){ fprintf(stderr,"Błąd uwierzytelnienia: brak username/password OpenSubtitles\n"); return 0; }
+    char body[512]; snprintf(body,sizeof body,"{\"username\":\"%s\",\"password\":\"%s\"}",user,pass);
+    char*hd=os_hdrs(key,NULL); int st; size_t n;
+    char*j=https_fetch("POST",OS_HOST,"/api/v1/login",hd,body,&st,&n,0); free(hd);
+    if(!j||st!=200){ fprintf(stderr,"Błąd: OpenSubtitles /login HTTP %d: %.120s\n",j?st:0,j?j:""); free(j); return 0; }
+    token[0]=0; json_str(j,"token",token,2048); char bu[256]; if(json_str(j,"base_url",bu,sizeof bu)&&bu[0]) snprintf(host,256,"%s",bu); else snprintf(host,256,"%s",OS_HOST);
+    free(j); return token[0]!=0;
+}
+static int cmd_os_login(const char*cfgpath){ char tok[2048],host[256]; if(!os_login(cfgpath,tok,host)) return 2;
+    printf("Zalogowano. base_url=%s\n",host); return 0; }
+static int cmd_os_search(const char*cfgpath,const char*imdb,const char*title,const char*query,const char*lang,const char*season,const char*episode){
+    char key[128],u[128],p[128]; os_creds(cfgpath,key,u,p);
+    if(!key[0]){ fprintf(stderr,"Błąd uwierzytelnienia: OpenSubtitles wymaga klucza API (Api-Key)\n"); return 2; }
+    SB q; sb_init(&q); int first=1;
+    #define QP(k,v) do{ if(v&&*(v)){ sb_puts(&q,first?"?":"&"); sb_puts(&q,k); sb_putc(&q,'='); char*e=url_encode(v); sb_puts(&q,e); free(e); first=0; } }while(0)
+    const char*qv=query&&query[0]?query:title;
+    QP("query",qv);
+    if(imdb&&imdb[0]){ const char*d=imdb; while(*d&&!isdigit((unsigned char)*d))d++; QP("imdb_id",d); }
+    QP("languages",lang); QP("season_number",season); QP("episode_number",episode);
+    #undef QP
+    char path[700]; snprintf(path,sizeof path,"/api/v1/subtitles%s",q.b); free(q.b);
+    char*hd=os_hdrs(key,NULL); int st; size_t n; char*j=https_fetch("GET",OS_HOST,path,hd,NULL,&st,&n,0); free(hd);
+    if(!j||st!=200){ fprintf(stderr,"Błąd: OpenSubtitles /subtitles HTTP %d\n",j?st:0); free(j); return 1; }
+    Hits h={0}; const char*pp=j;
+    while((pp=strstr(pp,"\"subtitle_id\""))){ const char*nx=strstr(pp+1,"\"subtitle_id\""); size_t wl=nx?(size_t)(nx-pp):strlen(pp);
+        char*blk=xmalloc(wl+1); memcpy(blk,pp,wl); blk[wl]=0;
+        Hit*x=hits_push(&h); snprintf(x->service,16,"opensubtitles");
+        long f=json_num(blk,"file_id"); if(f>0) snprintf(x->id,48,"%ld",f);
+        json_str(blk,"language",x->lang,sizeof x->lang);
+        char mv[256]; if(json_str(blk,"movie_name",mv,sizeof mv)&&mv[0]) snprintf(x->title,256,"%s",mv); else json_str(blk,"title",x->title,sizeof x->title);
+        long yr=json_num(blk,"year"); if(yr>0) snprintf(x->year,16,"%ld",yr);
+        json_str(blk,"release",x->release,sizeof x->release);
+        long dc=json_num(blk,"download_count"); x->dls=(dc>0)?(int)dc:0;
+        free(blk); pp=nx?nx:pp+wl; }
+    free(j);
+    if(h.n==0){ printf("Brak wyników.\n"); return 1; }
+    print_hits_header(); for(int i=0;i<h.n;i++) print_hit(h.a[i].service,h.a[i].id,h.a[i].lang,h.a[i].dls,h.a[i].title,h.a[i].year,h.a[i].release);
+    printf("\nPobierz: aqnapi <serwis> download/getid/download-id <ID>\n"); return 0;
+}
+static int cmd_os_download(const char*cfgpath,const char*file_id,const char*out,const char*movie,double flag_fps,SanOpts opt){
+    char key[128],u[128],p[128]; os_creds(cfgpath,key,u,p);
+    char tok[2048],host[256]; if(!os_login(cfgpath,tok,host)) return 2;
+    char body[128]; snprintf(body,sizeof body,"{\"file_id\":%s}",file_id);
+    char*hd=os_hdrs(key,tok); int st; size_t n; char*j=https_fetch("POST",host,"/api/v1/download",hd,body,&st,&n,0); free(hd);
+    if(!j||st!=200){ fprintf(stderr,"Błąd: OpenSubtitles /download HTTP %d: %.160s\n",j?st:0,j?j:""); free(j); return 1; }
+    char link[1024]; if(!json_str(j,"link",link,sizeof link)||!link[0]){ fprintf(stderr,"Nie znaleziono: brak linku do pobrania\n"); free(j); return 1; }
+    long remaining=json_num(j,"remaining"); char reset[64]; json_str(j,"reset_time",reset,sizeof reset);
+    /* pobierz link (GET, https_fetch obsłuży redirecty) */
+    const char*lu=link; if(!strncmp(lu,"https://",8))lu+=8; else if(!strncmp(lu,"http://",7))lu+=7;
+    char lh[256],lp[900]; const char*sl=strchr(lu,'/'); size_t hl=sl?(size_t)(sl-lu):strlen(lu); if(hl>=sizeof lh)hl=sizeof lh-1; memcpy(lh,lu,hl); lh[hl]=0; snprintf(lp,sizeof lp,"%s",sl?sl:"/");
+    int st2; size_t dl; char*data=https_fetch("GET",lh,lp,NULL,NULL,&st2,&dl,0); free(j);
+    if(!data||st2!=200){ fprintf(stderr,"Błąd: pobranie pliku HTTP %d\n",st2); free(data); return 1; }
+    double fps=resolve_fps(movie,0,flag_fps);
+    SB o; sb_init(&o); SanReport rep; convert_bytes((unsigned char*)data,dl,fps,"srt",&opt,&o,&rep); free(data);
+    char*outp=out?strdup(out):(movie?default_out(movie,NULL):strdup("napisy.srt")); write_file(outp,o.b,o.len); print_saved(outp,o.len,&rep);
+    printf("Pozostały limit pobrań: %ld (reset: %s)\n",remaining,reset); free(outp); free(o.b); return 0;
+}
 #endif /* AQNAPI_TLS */
 
 static int cmd_update(int check){
@@ -1276,7 +1354,7 @@ static void usage(void){
 }
 
 int main(int argc,char**argv){
-    const char*cmd=NULL,*out=NULL,*movie=NULL,*lang=NULL,*fmt=NULL,*cfgpath=NULL,*title=NULL,*imdb=NULL,*query=NULL;
+    const char*cmd=NULL,*out=NULL,*movie=NULL,*lang=NULL,*fmt=NULL,*cfgpath=NULL,*title=NULL,*imdb=NULL,*query=NULL,*season=NULL,*episode=NULL;
     double fps=0,from_fps=0,to_fps=0,maxd=0,mind=0;
     int keep_tags=0,strip_sdh=0,no_san=0,rebase=1,corrected=0,testing=0,check=0;
     const char*srt=NULL,*translator=NULL,*comment=NULL;
@@ -1293,6 +1371,8 @@ int main(int argc,char**argv){
         else if(!strcmp(a,"--title")){ if(++i<argc) title=argv[i]; }
         else if(!strcmp(a,"--imdb")){ if(++i<argc) imdb=argv[i]; }
         else if(!strcmp(a,"--query")){ if(++i<argc) query=argv[i]; }
+        else if(!strcmp(a,"--season")){ if(++i<argc) season=argv[i]; }
+        else if(!strcmp(a,"--episode")){ if(++i<argc) episode=argv[i]; }
         else if(!strcmp(a,"--srt")){ if(++i<argc) srt=argv[i]; }
         else if(!strcmp(a,"--translator")){ if(++i<argc) translator=argv[i]; }
         else if(!strcmp(a,"--comment")){ if(++i<argc) comment=argv[i]; }
@@ -1342,7 +1422,17 @@ int main(int argc,char**argv){
         if(!strcmp(sub,"download")){ if(!a1){usage();return 2;} return cmd_n24_download(a1,lang,out,fps,opt); }
         if(!strcmp(sub,"search")){ return n24_search(imdb,title); }
         fprintf(stderr,"napisy24: '%s' nieobsługiwane w wersji C (użyj aqnapi.py)\n",sub); return 2; }
-    if(!strcmp(cmd,"opensubtitles")||!strcmp(cmd,"os")){ fprintf(stderr,"opensubtitles: wymaga TLS — użyj wersji Python (aqnapi.py)\n"); return 2; }
+    if(!strcmp(cmd,"opensubtitles")||!strcmp(cmd,"os")){
+#ifdef AQNAPI_TLS
+        const char*sub=nfiles>0?files[0]:NULL,*a1=nfiles>1?files[1]:NULL; if(!sub){usage();return 2;}
+        if(!strcmp(sub,"login")) return cmd_os_login(cfgpath);
+        if(!strcmp(sub,"search")) return cmd_os_search(cfgpath,imdb,title,query,lang,season,episode);
+        if(!strcmp(sub,"download")){ if(!a1){usage();return 2;} return cmd_os_download(cfgpath,a1,out,movie,fps,opt); }
+        fprintf(stderr,"opensubtitles: '%s' nieobsługiwane w wersji C\n",sub); return 2;
+#else
+        fprintf(stderr,"opensubtitles: wymaga wariantu TLS (aqnapi-c-tls.com) lub aqnapi.py\n"); return 2;
+#endif
+    }
     if(!strcmp(cmd,"_selftest")){
         unsigned char key[32],pt[16],ct[16]; for(int i=0;i<32;i++)key[i]=i; for(int i=0;i<16;i++)pt[i]=(i<<4)|i;
         AES x; aes_init(&x,key); memcpy(ct,pt,16); aes_encrypt_block(&x,ct); char h[33]; hexlower(ct,16,h);

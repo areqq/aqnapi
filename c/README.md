@@ -35,7 +35,8 @@ zakresie, który obejmuje.
 Własna kryptografia zweryfikowana: **AES-256 (wektor FIPS-197)**, **SHA-256**,
 oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`).
 
-| `update [--check]` | **wariant TLS** (`c/build-tls.sh`): HTTPS do GitHub API przez mbedtls, porównanie wersji, podmiana binarki. `--check` zweryfikowany na żywo (v1.0.0 == najnowsza) |
+| `update [--check]` | **wariant TLS**: HTTPS do GitHub API przez mbedtls, porównanie wersji, podmiana binarki. `--check` zweryfikowany na żywo |
+| `opensubtitles login/search/download` | **wariant TLS**: pełny klient REST v1 (Api-Key + JWT), HTTPS przez mbedtls, parser JSON. **search i download bajtowo zgodne z Pythonem** (zweryfikowane kluczem na żywo) |
 
 ## Dwa warianty binarki C
 
@@ -49,12 +50,11 @@ oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`
 2.26). Zweryfikowano na żywo: handshake TLS 1.2 i pełny HTTPS do
 `api.opensubtitles.com`/`api.github.com`/`napisy24.pl`. Szczegóły/PoC: [`tls/`](tls/).
 
-**Jeszcze nie w C** (kolejne etapy): pełny klient **OpenSubtitles** (login→JWT,
-search, download — fundament `https_fetch`+`json_str` już jest, brakuje parsera
-JSON wyników + weryfikacji CA) i **WWW napisy24** (login/upload/delete);
-napiprojekt `account`/`associate`, napisy24 `login`/`imdb`; **interaktywny
-`sync`** (termios TUI). Do dystrybucji samo-aktualizacji: dodać `aqnapi-c.com`
-jako artefakt wydania (obecnie release publikuje tylko wersję Python-APE).
+**Jeszcze nie w C** (kolejne etapy): **WWW napisy24** (login/upload/delete przez
+HTTPS+formularz RSForm); napiprojekt `account`/`associate`, napisy24
+`login`/`imdb`; **interaktywny `sync`** (termios TUI). TLS: obecnie
+`MBEDTLS_SSL_VERIFY_NONE` (do zrobienia: weryfikacja CA z osadzonym cacert.pem /
+`usr/share/ssl/root`).
 
 > `iso-8859-2` jako drugorzędny fallback kodowania oraz kilka rzadkich, niezdefiniowanych
 > bajtów cp1250 są uproszczone względem Pythona (nie dotyczy typowych polskich napisów).
