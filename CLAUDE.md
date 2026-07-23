@@ -3,6 +3,33 @@
 Notatki dla Claude Code pracującego w tym projekcie. Najważniejsze fakty,
 pułapki i konwencje, których nie widać na pierwszy rzut oka.
 
+## ⚠️ ZASADA NACZELNA — dwie wersje muszą iść w parze
+
+Projekt ma **dwie równoległe implementacje tej samej funkcjonalności**:
+- **Python:** `aqnapi.py` (referencyjna, kompletna)
+- **C:** `c/aqnapi.c` (natywna, kompilowana przez cosmocc do APE)
+
+**Za każdym razem, gdy cokolwiek dodajesz, poprawiasz lub zmieniasz — zrób to w
+OBU wersjach i utrzymaj je zsynchronizowane.** Nie zostawiaj jednej w tyle.
+
+Obowiązkowy tryb pracy przy KAŻDEJ zmianie zachowania:
+1. Zmień `aqnapi.py` (+ testy w `tests/test_aqnapi.py`).
+2. Wprowadź **tę samą** zmianę w `c/aqnapi.c` (to samo zachowanie, te same
+   komunikaty/format wyjścia — cel: **bajtowa zgodność**).
+3. Przebuduj obie binarki: `cosmo/build.sh` (Python-APE) oraz `c/build.sh`
+   (C-APE), i uruchom testy: `python3 -m unittest discover -s tests`.
+4. **Zweryfikuj parność** na tym samym wejściu, np.:
+   `diff <(python3 aqnapi.py convert in -o /tmp/p) <(./dist/aqnapi-c.com convert in -o /tmp/c); cmp /tmp/p /tmp/c`.
+5. Zaktualizuj dokumentację obu (`README.md`, `docs/`, `c/README.md`) i tabelę
+   pokrycia w `c/README.md`.
+
+Jeśli funkcji **nie da się** jeszcze zrobić w C (np. wymaga TLS, którego brakuje
+w danym torze budowania), **wyraźnie odnotuj to** w `c/README.md` w sekcji „co
+pozostaje" — nie milcz o rozjeździe.
+
+Poświadczenia (w tym **klucz API OpenSubtitles**) są w
+`~/.config/aqnapi/config.ini` — używaj ich do weryfikacji end-to-end obu wersji.
+
 ## Czym to jest
 
 Jednoplikowy (`aqnapi.py`) klient CLI + moduł do trzech serwisów napisowych:
