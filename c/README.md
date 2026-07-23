@@ -37,6 +37,7 @@ oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`
 
 | `update [--check]` | **wariant TLS**: HTTPS do GitHub API przez mbedtls, porównanie wersji, podmiana binarki. `--check` zweryfikowany na żywo |
 | `opensubtitles login/search/download` | **wariant TLS**: pełny klient REST v1 (Api-Key + JWT), HTTPS przez mbedtls, parser JSON. **search i download bajtowo zgodne z Pythonem** (zweryfikowane kluczem na żywo) |
+| `napisy24 weblogin` | **wariant TLS**: logowanie WWW (Joomla/Community Builder `cb-login`) — cookie-jar + skrobanie tokena CSRF + sesja RSForm. Zweryfikowane na żywo („Zalogowano") |
 
 ## Dwa warianty binarki C
 
@@ -57,9 +58,10 @@ opensubtitles) przechodzą, a **podstawiony fałszywy CA jest odrzucany** (test
 negatywny). Fallback: systemowy `ca-certificates.crt`, ostatecznie brak
 weryfikacji, gdy bundla nie ma.
 
-**Jeszcze nie w C** (kolejne etapy): **WWW napisy24** (login/upload/delete przez
-HTTPS+formularz RSForm); napiprojekt `account`/`associate`, napisy24
-`login`/`imdb`; **interaktywny `sync`** (termios TUI).
+**Jeszcze nie w C** (kolejne etapy): napisy24 WWW **upload/delete** (login/sesja
+już są — `weblogin`; brakuje formularza RSForm multipart i `?usun=`); napiprojekt
+`account`/`associate`, napisy24 `login`(CheckLogin — jest w wersji Python)/`imdb`;
+**interaktywny `sync`** (termios TUI).
 
 > `iso-8859-2` jako drugorzędny fallback kodowania oraz kilka rzadkich, niezdefiniowanych
 > bajtów cp1250 są uproszczone względem Pythona (nie dotyczy typowych polskich napisów).
