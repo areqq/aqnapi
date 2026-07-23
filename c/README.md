@@ -50,11 +50,16 @@ oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`
 2.26). Zweryfikowano na żywo: handshake TLS 1.2 i pełny HTTPS do
 `api.opensubtitles.com`/`api.github.com`/`napisy24.pl`. Szczegóły/PoC: [`tls/`](tls/).
 
+**Weryfikacja CA — włączona:** wariant TLS ma osadzony bundle Mozilli
+(`/zip/cacert.pem`, wbudowany przez `build-tls.sh`) i używa
+`MBEDTLS_SSL_VERIFY_REQUIRED`. Zweryfikowane: prawdziwe certy (github/
+opensubtitles) przechodzą, a **podstawiony fałszywy CA jest odrzucany** (test
+negatywny). Fallback: systemowy `ca-certificates.crt`, ostatecznie brak
+weryfikacji, gdy bundla nie ma.
+
 **Jeszcze nie w C** (kolejne etapy): **WWW napisy24** (login/upload/delete przez
 HTTPS+formularz RSForm); napiprojekt `account`/`associate`, napisy24
-`login`/`imdb`; **interaktywny `sync`** (termios TUI). TLS: obecnie
-`MBEDTLS_SSL_VERIFY_NONE` (do zrobienia: weryfikacja CA z osadzonym cacert.pem /
-`usr/share/ssl/root`).
+`login`/`imdb`; **interaktywny `sync`** (termios TUI).
 
 > `iso-8859-2` jako drugorzędny fallback kodowania oraz kilka rzadkich, niezdefiniowanych
 > bajtów cp1250 są uproszczone względem Pythona (nie dotyczy typowych polskich napisów).

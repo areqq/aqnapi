@@ -35,6 +35,11 @@ make -j"$(nproc)" o//examples/aqnapic
 
 mkdir -p "$root/dist"
 cp o/examples/aqnapic "$root/dist/aqnapi-c-tls.com"
+# wbuduj bundle CA do APE (zipos /zip/cacert.pem) — weryfikacja certyfikatów TLS
+if command -v zip >/dev/null 2>&1 && [ -f "$here/cacert.pem" ]; then
+  cp "$here/cacert.pem" "$root/dist/cacert.pem"
+  ( cd "$root/dist" && zip -qj aqnapi-c-tls.com cacert.pem && rm -f cacert.pem )
+fi
 chmod +x "$root/dist/aqnapi-c-tls.com"
 echo "Gotowe: $root/dist/aqnapi-c-tls.com ($(wc -c < "$root/dist/aqnapi-c-tls.com") B)"
 "$root/dist/aqnapi-c-tls.com" --version
