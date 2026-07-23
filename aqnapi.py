@@ -2307,6 +2307,57 @@ def _reject_output_with_many(files: List[str], output: Optional[str]) -> bool:
 
 # ---- polecenia agregujące ----
 
+GITHUB_REPO = "areqq/aqnapi"
+
+
+def _version_tuple(s: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", s or "0"))
+
+
+def cmd_update(args, cfg):
+    """Samo-aktualizacja: pobierz najnowsze wydanie z GitHuba i podmień plik,
+    jeśli dostępna nowsza wersja."""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    resp = http_get(url, headers={"User-Agent": USER_AGENT_OS,
+                                  "Accept": "application/vnd.github+json"},
+                    timeout=args.timeout)
+    if resp.status != 200:
+        raise ServerError(f"GitHub API zwróciło HTTP {resp.status}")
+    data = resp.json()
+    latest = (data.get("tag_name") or "").lstrip("v")
+    if not latest:
+        raise ServerError("Nie udało się odczytać wersji z wydania GitHub")
+    if _version_tuple(latest) <= _version_tuple(__version__):
+        print(f"Masz najnowszą wersję (v{__version__}).")
+        return 0
+    print(f"Dostępna nowsza wersja: v{latest} (masz v{__version__})")
+    if args.check:
+        return 0
+    # ścieżka do samego siebie + wybór artefaktu
+    self_path = os.path.realpath(sys.argv[0])
+    if self_path.startswith("/zip/") or not os.path.isfile(self_path):
+        self_path = os.path.realpath(sys.executable)   # binarka APE
+    asset_name = "aqnapi.com" if self_path.lower().endswith((".com", ".exe")) else "aqnapi.py"
+    asset = next((a for a in data.get("assets", []) if a.get("name") == asset_name), None)
+    if not asset:
+        raise NotFoundError(f"Wydanie nie zawiera artefaktu '{asset_name}'")
+    print(f"Pobieram {asset_name} …")
+    dl = http_get(asset["browser_download_url"],
+                  headers={"User-Agent": USER_AGENT_OS}, timeout=args.timeout)
+    if dl.status != 200 or not dl.body:
+        raise ServerError(f"Pobieranie artefaktu nie powiodło się (HTTP {dl.status})")
+    tmp = self_path + ".new"
+    with open(tmp, "wb") as f:
+        f.write(dl.body)
+    try:
+        os.chmod(tmp, os.stat(self_path).st_mode)
+    except OSError:
+        os.chmod(tmp, 0o755)
+    os.replace(tmp, self_path)
+    print(f"Zaktualizowano do v{latest}: {self_path}")
+    return 0
+
+
 def cmd_hash(args, cfg):
     h = file_hashes(args.file)
     print(f"OSH (fh)        : {h['osh']}")
@@ -3343,6 +3394,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     h = sub.add_parser("hash", help="pokaż hasze pliku (OSH + MD5-10MiB)")
     h.add_argument("file"); h.set_defaults(func=cmd_hash)
+
+    up = sub.add_parser("update", help="zaktualizuj program do najnowszego wydania z GitHub")
+    up.add_argument("--check", action="store_true", help="tylko sprawdź, nie pobieraj")
+    up.set_defaults(func=cmd_update)
 
     fp = sub.add_parser("fps", help="odczytaj FPS z pliku filmowego")
     fp.add_argument("file"); fp.set_defaults(func=cmd_fps)
