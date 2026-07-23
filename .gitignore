@@ -4,3 +4,4 @@
 /c/toolchain/
 __pycache__/
 *.pyc
+/c/mono/
