@@ -28,6 +28,14 @@ jobs:
             exit 1
           fi
 
+      - name: Sprawdź zgodność wersji C (parność)
+        run: |
+          cver=$(grep -oE '#define VERSION "[0-9.]+"' c/aqnapi.c | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          echo "C VERSION=$cver"
+          if [ "${GITHUB_REF_NAME#v}" != "$cver" ]; then
+            echo "::error::VERSION w c/aqnapi.c ($cver) != tag ${GITHUB_REF_NAME}"; exit 1
+          fi
+
       - name: Zainstaluj zip + 7-Zip
         run: sudo apt-get update && sudo apt-get install -y zip p7zip-full
 
@@ -60,3 +68,27 @@ jobs:
             --generate-notes \
             out/aqnapi.com out/aqnapi.exe "out/aqnapi-${GITHUB_REF_NAME}.com" \
             out/aqnapi.py out/SHA256SUMS.txt
+
+  # Natywna binarka C z TLS (monorepo Cosmopolitan + mbedtls) — potrzebna do
+  # samo-aktualizacji wersji C (aqnapi-c.com). Budowa jest ciężka (~kilkanaście
+  # minut przy pustym cache), więc osobny job dołączający artefakt do wydania.
+  binary-c:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache monorepo Cosmopolitan + cosmocc
+        uses: actions/cache@v4
+        with:
+          path: c/mono
+          key: cosmo-mono-4.0.2-v1
+      - name: Zależności
+        run: sudo apt-get update && sudo apt-get install -y build-essential unzip zip
+      - name: Zbuduj binarkę C z TLS
+        run: sh c/build-tls.sh
+      - name: Wgraj aqnapi-c.com do wydania
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp dist/aqnapi-c-tls.com aqnapi-c.com
+          gh release upload "${GITHUB_REF_NAME}" aqnapi-c.com --clobber
