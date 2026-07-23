@@ -1172,7 +1172,18 @@ static int cmd_np_upload(const char*movie,const char*srt,const char*lang,const c
 #include "third_party/mbedtls/ctr_drbg.h"
 #include "third_party/mbedtls/x509_crt.h"
 
-/* GET/POST po HTTPS; obsługa chunked i przekierowań. Zwraca ciało (malloc). */
+/* prosty cookie-jar dla sesji WWW (napisy24). Włączany globalnie. */
+static char g_cookies[4096]=""; static int g_cookies_on=0;
+static void cookie_reset(void){ g_cookies[0]=0; g_cookies_on=1; }
+static void cookie_set(const char*nv){ /* nv = "name=value" (bez atrybutów) */
+    const char*eq=strchr(nv,'='); if(!eq) return; size_t nl=eq-nv; char name[128]; if(nl>=sizeof name)nl=sizeof name-1; memcpy(name,nv,nl); name[nl]=0;
+    /* usuń istniejące o tej nazwie */ char nb[4096]; nb[0]=0; char tmp[4096]; snprintf(tmp,sizeof tmp,"%s",g_cookies);
+    for(char*t=strtok(tmp,";");t;t=strtok(NULL,";")){ char*s=t; while(*s==' ')s++; if(strncmp(s,name,nl)==0&&s[nl]=='='){ continue; } if(nb[0]){ strncat(nb,"; ",sizeof nb-strlen(nb)-1);} strncat(nb,s,sizeof nb-strlen(nb)-1); }
+    if(nb[0]) strncat(nb,"; ",sizeof nb-strlen(nb)-1); strncat(nb,nv,sizeof nb-strlen(nb)-1); snprintf(g_cookies,sizeof g_cookies,"%s",nb); }
+static void cookie_capture(const char*hdrs){ for(const char*p=hdrs;*p;p++){ if((p==hdrs||p[-1]=='\n')&&!strncasecmp(p,"set-cookie:",11)){
+    const char*v=p+11; while(*v==' ')v++; const char*e=v; while(*e&&*e!=';'&&*e!='\r'&&*e!='\n')e++; size_t l=e-v; char nv[512]; if(l>=sizeof nv)l=sizeof nv-1; memcpy(nv,v,l); nv[l]=0; if(strchr(nv,'=')) cookie_set(nv); } } }
+
+/* GET/POST po HTTPS; obsługa chunked, przekierowań i cookies. Zwraca ciało (malloc). */
 static char* https_fetch(const char*method,const char*host,const char*path,
                          const char*extra_hdrs,const char*post,int*status,size_t*outlen,int depth){
     if(depth>6) return NULL;
@@ -1199,7 +1210,8 @@ static char* https_fetch(const char*method,const char*host,const char*path,
     { SB req; sb_init(&req); char h[1400];
       snprintf(h,sizeof h,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: aqnapi v%s\r\n",method,path,host,VERSION);
       sb_puts(&req,h); if(extra_hdrs) sb_puts(&req,extra_hdrs);
-      if(post){ char cl[64]; snprintf(cl,sizeof cl,"Content-Type: application/json\r\nContent-Length: %zu\r\n",strlen(post)); sb_puts(&req,cl); }
+      if(g_cookies_on && g_cookies[0]){ sb_puts(&req,"Cookie: "); sb_puts(&req,g_cookies); sb_puts(&req,"\r\n"); }
+      if(post){ char cl[64]; snprintf(cl,sizeof cl,"Content-Length: %zu\r\n",strlen(post)); sb_puts(&req,cl); if(!extra_hdrs||!strcasestr(extra_hdrs,"content-type")) sb_puts(&req,"Content-Type: application/json\r\n"); }
       sb_puts(&req,"Connection: close\r\n\r\n"); if(post) sb_puts(&req,post);
       size_t off=0; int fail=0; while(off<req.len){ r=mbedtls_ssl_write(&ssl,(unsigned char*)req.b+off,req.len-off);
           if(r<=0){ if(r==MBEDTLS_ERR_SSL_WANT_WRITE) continue; fail=1; break; } off+=r; }
@@ -1209,6 +1221,7 @@ static char* https_fetch(const char*method,const char*host,const char*path,
       int st=0; sscanf(resp.b,"HTTP/1.%*d %d",&st);
       char*he=strstr(resp.b,"\r\n\r\n"); if(!he){ free(resp.b); goto done; }
       *he=0; char*hdrs=resp.b; char*bodyp=he+4; size_t blen=resp.len-(bodyp-resp.b);
+      if(g_cookies_on) cookie_capture(hdrs);
       if(st>=300&&st<400){ /* przekierowanie */
           char*loc=NULL; for(char*p=hdrs;*p;p++) if((p==hdrs||p[-1]=='\n')&&!strncasecmp(p,"location:",9)){ loc=p+9; break; }
           if(loc){ while(*loc==' ')loc++; char url[1024]; size_t i=0; while(loc[i]&&loc[i]!='\r'&&loc[i]!='\n'&&i<sizeof url-1){ url[i]=loc[i]; i++; } url[i]=0;
@@ -1310,6 +1323,29 @@ static int cmd_os_download(const char*cfgpath,const char*file_id,const char*out,
     char*outp=out?strdup(out):(movie?default_out(movie,NULL):strdup("napisy.srt")); write_file(outp,o.b,o.len); print_saved(outp,o.len,&rep);
     printf("Pozostały limit pobrań: %ld (reset: %s)\n",remaining,reset); free(outp); free(o.b); return 0;
 }
+/* --- napisy24 WWW (Joomla + Community Builder + RSForm) po HTTPS --- */
+static int n24_scrape_token(const char*html,char*out,size_t osz){
+    for(const char*p=strstr(html,"name=\"");p;p=strstr(p+1,"name=\"")){ const char*h=p+6; int ok=1;
+        for(int i=0;i<32;i++){ if(!isxdigit((unsigned char)h[i])){ ok=0; break; } }
+        if(ok && !strncmp(h+32,"\" value=\"1\"",10)){ size_t l=32; if(l>=osz)l=osz-1; memcpy(out,h,l); out[l]=0; return 1; } }
+    out[0]=0; return 0;
+}
+static int n24_web_login(const char*cfgpath){
+    Ini ini; ini_load(config_path(cfgpath),&ini); const char*u=ini_get(&ini,0,"login"),*pw=ini_get(&ini,0,"pass");
+    const char*eu=getenv("NAPI24_LOGIN"),*ep=getenv("NAPI24_PASS"); if(eu&&*eu)u=eu; if(ep&&*ep)pw=ep;
+    if(!u||!u[0]||!pw||!pw[0]){ fprintf(stderr,"Błąd uwierzytelnienia: brak login/pass napisy24\n"); return 0; }
+    cookie_reset();
+    int st; size_t n; char*home=https_fetch("GET","napisy24.pl","/",NULL,NULL,&st,&n,0);
+    char token[40]=""; if(home){ n24_scrape_token(home,token,sizeof token); free(home); }
+    char*eu2=url_encode(u),*ep2=url_encode(pw); SB b; sb_init(&b); char t[700];
+    snprintf(t,sizeof t,"username=%s&passwd=%s&remember=yes&option=com_comprofiler&view=login&op2=login&return=&loginfrom=loginmodule",eu2,ep2);
+    sb_puts(&b,t); free(eu2); free(ep2); if(token[0]){ sb_puts(&b,"&"); sb_puts(&b,token); sb_puts(&b,"=1"); }
+    char*resp=https_fetch("POST","napisy24.pl","/cb-login","Content-Type: application/x-www-form-urlencoded\r\n",b.b,&st,&n,0); free(b.b);
+    int ok=resp && strstr(resp,"Wyloguj")!=NULL; free(resp);
+    char*dj=https_fetch("GET","napisy24.pl","/dodaj-napisy",NULL,NULL,&st,&n,0); free(dj);
+    return ok;
+}
+static int cmd_n24_weblogin(const char*cfgpath){ if(n24_web_login(cfgpath)){ printf("Zalogowano do napisy24 (WWW).\n"); return 0; } fprintf(stderr,"napisy24: logowanie WWW nieudane\n"); return 1; }
 #endif /* AQNAPI_TLS */
 
 static int cmd_update(int check){
@@ -1425,6 +1461,13 @@ int main(int argc,char**argv){
         fprintf(stderr,"napiprojekt: '%s' nieobsługiwane w wersji C (użyj aqnapi.py)\n",sub); return 2; }
     if(!strcmp(cmd,"napisy24")||!strcmp(cmd,"n24")){ const char*sub=nfiles>0?files[0]:NULL,*a1=nfiles>1?files[1]:NULL; if(!sub){usage();return 2;}
         if(!strcmp(sub,"hash")){ if(!a1){usage();return 2;} return cmd_hash(a1); }
+        if(!strcmp(sub,"weblogin")){
+#ifdef AQNAPI_TLS
+            return cmd_n24_weblogin(cfgpath);
+#else
+            fprintf(stderr,"weblogin wymaga wariantu TLS (aqnapi-c-tls.com)\n"); return 2;
+#endif
+        }
         if(!strcmp(sub,"getid")){ if(!a1){usage();return 2;} return cmd_n24_getid(a1,out,movie,fps,opt); }
         if(!strcmp(sub,"download")){ if(!a1){usage();return 2;} return cmd_n24_download(a1,lang,out,fps,opt); }
         if(!strcmp(sub,"search")){ return n24_search(imdb,title); }
