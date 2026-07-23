@@ -37,8 +37,13 @@ oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`
 
 **Jeszcze nie w C** (kolejne etapy): napiprojekt `account`/`associate`, napisy24
 `login`/`imdb` (HTTP z poświadczeniami); **interaktywny `sync`** (termios TUI).
-**Wymaga TLS (osobny etap: vendorowanie BearSSL + certyfikaty):** OpenSubtitles
-(search/download/login) oraz logowanie/upload/delete WWW napisy24.
+
+**TLS — droga potwierdzona (PoC, jak redbean):** zamiast vendorowania BearSSL,
+buduje się w monorepo Cosmopolitan i linkuje `third_party/mbedtls`. Zweryfikowano
+na żywo klienta HTTPS w APE: **TLS 1.2 do `api.opensubtitles.com` (403 bez
+klucza) i `napisy24.pl` (200)**. Szczegóły i przepis: [`c/tls/`](tls/). Pozostaje
+integracja pełnych klientów OpenSubtitles (REST/JWT/JSON) i WWW napisy24 na tym
+fundamencie (OpenSubtitles wymaga do weryfikacji klucza API użytkownika).
 
 > `iso-8859-2` jako drugorzędny fallback kodowania oraz kilka rzadkich, niezdefiniowanych
 > bajtów cp1250 są uproszczone względem Pythona (nie dotyczy typowych polskich napisów).
