@@ -24,7 +24,7 @@
 #include <unistd.h>
 #include "third_party/zlib/zlib.h"
 
-#define VERSION "1.0.0"
+#define VERSION "1.0.1"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
