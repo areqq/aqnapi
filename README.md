@@ -35,13 +35,21 @@ Pełna referencja poleceń: [`docs/cli.md`](docs/cli.md).
 **Gotowa binarka (bez Pythona, wszystkie platformy)** — z [Releases](https://github.com/areqq/aqnapi/releases/latest):
 
 ```bash
-# Linux / macOS / *BSD
+# Linux / macOS / *BSD (wersja Python-APE: pełna funkcjonalność)
 curl -L -o aqnapi https://github.com/areqq/aqnapi/releases/latest/download/aqnapi.com
 chmod +x aqnapi && ./aqnapi --help
 # Windows: pobierz aqnapi.exe z Releases i uruchom
+# Natywna binarka C (mała, ~1 MB, TLS): aqnapi-c.com
 ```
 
 Sumy kontrolne: `SHA256SUMS.txt` w każdym wydaniu.
+
+**Samo-aktualizacja** — obie wersje aktualizują się z GitHuba:
+
+```bash
+aqnapi update --check     # sprawdź, czy jest nowsza wersja
+aqnapi update             # pobierz najnowsze wydanie i podmień się
+```
 
 **Z Pythonem (bez instalacji)** — wystarczy Python 3.9+ (realnie 3.7+):
 
