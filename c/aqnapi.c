@@ -1163,6 +1163,103 @@ static int cmd_np_upload(const char*movie,const char*srt,const char*lang,const c
     free(st);free(wr);free(er);free(xml); return rc;
 }
 
+/* ---------------------------------------------------------------- HTTPS (TLS) + update
+ * Aktywne tylko w buildzie monorepo (-DAQNAPI_TLS, linkowanie third_party/mbedtls). */
+#ifdef AQNAPI_TLS
+#include "third_party/mbedtls/ssl.h"
+#include "third_party/mbedtls/net_sockets.h"
+#include "third_party/mbedtls/entropy.h"
+#include "third_party/mbedtls/ctr_drbg.h"
+
+/* GET/POST po HTTPS; obsługa chunked i przekierowań. Zwraca ciało (malloc). */
+static char* https_fetch(const char*method,const char*host,const char*path,
+                         const char*extra_hdrs,const char*post,int*status,size_t*outlen,int depth){
+    if(depth>6) return NULL;
+    mbedtls_net_context net; mbedtls_ssl_context ssl; mbedtls_ssl_config conf;
+    mbedtls_ctr_drbg_context drbg; mbedtls_entropy_context ent; char*result=NULL;
+    mbedtls_net_init(&net); mbedtls_ssl_init(&ssl); mbedtls_ssl_config_init(&conf);
+    mbedtls_ctr_drbg_init(&drbg); mbedtls_entropy_init(&ent);
+    int r;
+    if(mbedtls_ctr_drbg_seed(&drbg,mbedtls_entropy_func,&ent,(const unsigned char*)"aqnapi",6)) goto done;
+    if(mbedtls_net_connect(&net,host,"443",MBEDTLS_NET_PROTO_TCP)) goto done;
+    if(mbedtls_ssl_config_defaults(&conf,MBEDTLS_SSL_IS_CLIENT,MBEDTLS_SSL_TRANSPORT_STREAM,MBEDTLS_SSL_PRESET_DEFAULT)) goto done;
+    mbedtls_ssl_conf_authmode(&conf,MBEDTLS_SSL_VERIFY_NONE);
+    mbedtls_ssl_conf_rng(&conf,mbedtls_ctr_drbg_random,&drbg);
+    if(mbedtls_ssl_setup(&ssl,&conf)) goto done;
+    mbedtls_ssl_set_hostname(&ssl,host);
+    mbedtls_ssl_set_bio(&ssl,&net,mbedtls_net_send,mbedtls_net_recv,NULL);
+    while((r=mbedtls_ssl_handshake(&ssl))!=0){ if(r!=MBEDTLS_ERR_SSL_WANT_READ&&r!=MBEDTLS_ERR_SSL_WANT_WRITE) goto done; }
+    { SB req; sb_init(&req); char h[1400];
+      snprintf(h,sizeof h,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: aqnapi-c/%s\r\nAccept: */*\r\n",method,path,host,VERSION);
+      sb_puts(&req,h); if(extra_hdrs) sb_puts(&req,extra_hdrs);
+      if(post){ char cl[64]; snprintf(cl,sizeof cl,"Content-Type: application/json\r\nContent-Length: %zu\r\n",strlen(post)); sb_puts(&req,cl); }
+      sb_puts(&req,"Connection: close\r\n\r\n"); if(post) sb_puts(&req,post);
+      size_t off=0; int fail=0; while(off<req.len){ r=mbedtls_ssl_write(&ssl,(unsigned char*)req.b+off,req.len-off);
+          if(r<=0){ if(r==MBEDTLS_ERR_SSL_WANT_WRITE) continue; fail=1; break; } off+=r; }
+      free(req.b); if(fail) goto done; }
+    { SB resp; sb_init(&resp); unsigned char buf[4096];
+      while((r=mbedtls_ssl_read(&ssl,buf,sizeof buf))>0) sb_putn(&resp,(char*)buf,(size_t)r);
+      int st=0; sscanf(resp.b,"HTTP/1.%*d %d",&st);
+      char*he=strstr(resp.b,"\r\n\r\n"); if(!he){ free(resp.b); goto done; }
+      *he=0; char*hdrs=resp.b; char*bodyp=he+4; size_t blen=resp.len-(bodyp-resp.b);
+      if(st>=300&&st<400){ /* przekierowanie */
+          char*loc=NULL; for(char*p=hdrs;*p;p++) if((p==hdrs||p[-1]=='\n')&&!strncasecmp(p,"location:",9)){ loc=p+9; break; }
+          if(loc){ while(*loc==' ')loc++; char url[1024]; size_t i=0; while(loc[i]&&loc[i]!='\r'&&loc[i]!='\n'&&i<sizeof url-1){ url[i]=loc[i]; i++; } url[i]=0;
+              char nh[256],np2[1024]; const char*u=url; if(!strncmp(u,"https://",8))u+=8; else if(!strncmp(u,"http://",7))u+=7;
+              const char*sl=strchr(u,'/'); if(sl){ size_t hl=sl-u; if(hl>=sizeof nh)hl=sizeof nh-1; memcpy(nh,u,hl); nh[hl]=0; snprintf(np2,sizeof np2,"%s",sl); }
+              else { snprintf(nh,sizeof nh,"%s",u); strcpy(np2,"/"); }
+              free(resp.b);
+              /* zwolnij TLS przed rekurencją */ mbedtls_ssl_close_notify(&ssl); mbedtls_ssl_free(&ssl); mbedtls_ssl_config_free(&conf); mbedtls_net_free(&net); mbedtls_ctr_drbg_free(&drbg); mbedtls_entropy_free(&ent);
+              return https_fetch("GET",nh,np2,extra_hdrs,NULL,status,outlen,depth+1); }
+      }
+      int chunked=0; for(char*p=hdrs;*p;p++) if((p==hdrs||p[-1]=='\n')&&!strncasecmp(p,"transfer-encoding:",18)&&strcasestr(p,"chunked")) chunked=1;
+      SB out; sb_init(&out);
+      if(chunked){ char*p=bodyp; size_t left=blen; while(left>0){ char*eol=memchr(p,'\n',left); if(!eol) break; long csz=strtol(p,NULL,16); size_t adv=(eol-p)+1; p+=adv; left-=adv; if(csz<=0) break; if((size_t)csz>left) csz=left; sb_putn(&out,p,csz); p+=csz; left-=csz; if(left>=2){ p+=2; left-=2; } } }
+      else sb_putn(&out,bodyp,blen);
+      *status=st; *outlen=out.len; result=out.b; free(resp.b); }
+done:
+    mbedtls_ssl_close_notify(&ssl); mbedtls_ssl_free(&ssl); mbedtls_ssl_config_free(&conf);
+    mbedtls_net_free(&net); mbedtls_ctr_drbg_free(&drbg); mbedtls_entropy_free(&ent);
+    return result;
+}
+static int json_str(const char*j,const char*key,char*out,size_t osz){ char pat[64]; snprintf(pat,sizeof pat,"\"%s\"",key);
+    const char*p=strstr(j,pat); if(!p){ out[0]=0; return 0; } p+=strlen(pat); while(*p&&*p!=':')p++; if(*p)p++; while(*p==' '||*p=='"')p++;
+    size_t i=0; while(*p&&*p!='"'&&i<osz-1){ if(*p=='\\'&&p[1]){p++;} out[i++]=*p++; } out[i]=0; return i>0; }
+#endif /* AQNAPI_TLS */
+
+static int cmd_update(int check){
+#ifdef AQNAPI_TLS
+    int st; size_t n;
+    char*j=https_fetch("GET","api.github.com","/repos/areqq/aqnapi/releases/latest",
+                       "Accept: application/vnd.github+json\r\n",NULL,&st,&n,0);
+    if(!j||st!=200){ fprintf(stderr,"Błąd: GitHub API HTTP %d\n",j?st:0); free(j); return 1; }
+    char tag[32]; json_str(j,"tag_name",tag,sizeof tag); const char*latest=tag[0]=='v'?tag+1:tag;
+    /* porównanie wersji (major.minor.patch) */
+    int lv[3]={0,0,0},cv[3]={0,0,0}; sscanf(latest,"%d.%d.%d",&lv[0],&lv[1],&lv[2]); sscanf(VERSION,"%d.%d.%d",&cv[0],&cv[1],&cv[2]);
+    int newer=(lv[0]>cv[0])||(lv[0]==cv[0]&&(lv[1]>cv[1]||(lv[1]==cv[1]&&lv[2]>cv[2])));
+    if(!newer){ printf("Masz najnowszą wersję (v%s).\n",VERSION); free(j); return 0; }
+    printf("Dostępna nowsza wersja: v%s (masz v%s)\n",latest,VERSION);
+    if(check){ free(j); return 0; }
+    /* znajdź asset aqnapi-c.com i pobierz */
+    char*ap=strstr(j,"\"aqnapi-c.com\""); char durl[1024]={0};
+    if(ap){ char*bp=strstr(ap,"browser_download_url"); if(bp) json_str(bp,"browser_download_url",durl,sizeof durl); }
+    if(!durl[0]){ fprintf(stderr,"Nie znaleziono artefaktu aqnapi-c.com w wydaniu.\n"); free(j); return 1; }
+    free(j);
+    const char*u=durl; if(!strncmp(u,"https://",8))u+=8; char host[256],path[1024]; const char*sl=strchr(u,'/');
+    size_t hl=sl?(size_t)(sl-u):strlen(u); if(hl>=sizeof host)hl=sizeof host-1; memcpy(host,u,hl); host[hl]=0; snprintf(path,sizeof path,"%s",sl?sl:"/");
+    printf("Pobieram aqnapi-c.com …\n"); size_t bl; int st2;
+    char*bin=https_fetch("GET",host,path,NULL,NULL,&st2,&bl,0);
+    if(!bin||st2!=200||bl<1000){ fprintf(stderr,"Pobieranie nie powiodło się (HTTP %d).\n",st2); free(bin); return 1; }
+    /* podmień samego siebie */
+    char self[1024]; ssize_t sl2=readlink("/proc/self/exe",self,sizeof self-1); if(sl2>0) self[sl2]=0; else snprintf(self,sizeof self,"%s","aqnapi-c.com");
+    char tmp[1100]; snprintf(tmp,sizeof tmp,"%s.new",self); FILE*f=fopen(tmp,"wb"); if(!f){ fprintf(stderr,"Nie mogę zapisać.\n"); free(bin); return 1; }
+    fwrite(bin,1,bl,f); fclose(f); free(bin); chmod(tmp,0755); if(rename(tmp,self)!=0){ fprintf(stderr,"Nie mogę podmienić %s\n",self); return 1; }
+    printf("Zaktualizowano do v%s: %s\n",latest,self); return 0;
+#else
+    (void)check; fprintf(stderr,"update: ta binarka nie ma TLS (build cosmocc). Użyj binarki z monorepo (mbedtls) albo aqnapi.py.\n"); return 2;
+#endif
+}
+
 static void usage(void){
     printf("aqnapi %s (wersja C)\n"
         "Użycie:\n"
@@ -1181,7 +1278,7 @@ static void usage(void){
 int main(int argc,char**argv){
     const char*cmd=NULL,*out=NULL,*movie=NULL,*lang=NULL,*fmt=NULL,*cfgpath=NULL,*title=NULL,*imdb=NULL,*query=NULL;
     double fps=0,from_fps=0,to_fps=0,maxd=0,mind=0;
-    int keep_tags=0,strip_sdh=0,no_san=0,rebase=1,corrected=0,testing=0;
+    int keep_tags=0,strip_sdh=0,no_san=0,rebase=1,corrected=0,testing=0,check=0;
     const char*srt=NULL,*translator=NULL,*comment=NULL;
     char*files[64]; int nfiles=0; double offs[32]; int noff=0; char*ats[64]; int nat=0; char*anch[64]; int nanch=0;
     /* parsowanie niezależne od pozycji (flagi globalne mogą być przed poleceniem) */
@@ -1201,6 +1298,7 @@ int main(int argc,char**argv){
         else if(!strcmp(a,"--comment")){ if(++i<argc) comment=argv[i]; }
         else if(!strcmp(a,"--corrected")) corrected=1;
         else if(!strcmp(a,"--test")||!strcmp(a,"--dry-run")) testing=1;
+        else if(!strcmp(a,"--check")) check=1;
         else if(!strcmp(a,"--fps")){ if(++i<argc) fps=atof(argv[i]); }
         else if(!strcmp(a,"--from")){ if(++i<argc) from_fps=atof(argv[i]); }
         else if(!strcmp(a,"--to")){ if(++i<argc) to_fps=atof(argv[i]); }
@@ -1229,6 +1327,7 @@ int main(int argc,char**argv){
     if(!strcmp(cmd,"split")){ if(!pos){usage();return 2;} return cmd_split(pos,out,ats,nat,rebase,fps,fmt); }
     if(!strcmp(cmd,"config")){ return cmd_config(pos?pos:"show",cfgpath); }
     if(!strcmp(cmd,"sync")){ return cmd_sync(nfiles>0?files[0]:NULL, nfiles>1?files[1]:NULL, out, noff>0?offs[0]:0, noff>0, anch, nanch, fps); }
+    if(!strcmp(cmd,"update")){ return cmd_update(check); }
     if(!strcmp(cmd,"get")){ if(!pos){usage();return 2;} return cmd_get(pos,lang,out,fps,opt); }
     if(!strcmp(cmd,"search")){ return cmd_search(imdb,title,query,lang); }
     if(!strcmp(cmd,"napiprojekt")||!strcmp(cmd,"np")){ const char*sub=nfiles>0?files[0]:NULL,*a1=nfiles>1?files[1]:NULL; if(!sub){usage();return 2;}
