@@ -1346,6 +1346,67 @@ static int n24_web_login(const char*cfgpath){
     return ok;
 }
 static int cmd_n24_weblogin(const char*cfgpath){ if(n24_web_login(cfgpath)){ printf("Zalogowano do napisy24 (WWW).\n"); return 0; } fprintf(stderr,"napisy24: logowanie WWW nieudane\n"); return 1; }
+
+/* walidacja lokalna jak check_srt_for_napisy24: max 2 linie/blok. Zwraca liczbę problemów. */
+static int n24_check_srt(const char*text,char*first,size_t fsz){
+    Cues c; cues_init(&c); parse_any(text,DEFAULT_FPS,&c); int probs=0; first[0]=0;
+    for(int i=0;i<c.n;i++){ int real=0; for(int k=0;k<c.a[i].nlines;k++){ int ne=0; for(char*q=c.a[i].lines[k];*q;q++) if(!is_ascii_ws(*q)){ ne=1; break; } if(ne) real++; }
+        if(real>2){ if(!probs) snprintf(first,fsz,"Blok %d: %d linii tekstu (max 2)",i+1,real); probs++; } }
+    return probs;
+}
+/* normalizacja do CRLF (jak normalize_for_napisy24) — zwraca bajty (malloc) + len */
+static unsigned char* n24_normalize_crlf(const char*text,size_t*outlen){
+    Cues c; cues_init(&c); parse_any(text,DEFAULT_FPS,&c); SB e; sb_init(&e);
+    for(int i=0;i<c.n;i++){ char t1[16],t2[16]; ms_to_srt(c.a[i].start,t1); ms_to_srt(c.a[i].end,t2); char num[16]; snprintf(num,sizeof num,"%d",i+1);
+        sb_puts(&e,num); sb_putc(&e,'\n'); sb_puts(&e,t1); sb_puts(&e," --> "); sb_puts(&e,t2); sb_putc(&e,'\n');
+        if(c.a[i].nlines==0) sb_putc(&e,'\n'); for(int k=0;k<c.a[i].nlines;k++){ sb_puts(&e,c.a[i].lines[k]); sb_putc(&e,'\n'); } sb_putc(&e,'\n'); }
+    size_t b=0,en=e.len; while(b<en&&is_ascii_ws(e.b[b]))b++; while(en>b&&is_ascii_ws(e.b[en-1]))en--;
+    SB s; sb_init(&s); for(size_t i=b;i<en;i++){ if(e.b[i]=='\n') sb_puts(&s,"\r\n"); else sb_putc(&s,e.b[i]); } sb_puts(&s,"\r\n");
+    free(e.b); *outlen=s.len; return (unsigned char*)s.b;
+}
+typedef struct { const char*imdb,*title,*title_pl,*year,*release,*translator,*sync,*proof,*resolution,*duration,*size,*fps,*season,*episode,*episode_title; } N24Meta;
+static int cmd_n24_upload(const char*cfgpath,const char*srt,const N24Meta*m,int dry){
+    if(!srt){ fprintf(stderr,"napisy24 upload wymaga --srt\n"); return 2; }
+    size_t rn; char*raw=read_file(srt,&rn); if(!raw){ fprintf(stderr,"Brak pliku: %s\n",srt); return 1; }
+    char*text=decode_text((unsigned char*)raw,rn); free(raw);
+    char prob[128]; int probs=n24_check_srt(text,prob,sizeof prob);
+    if(probs){ fprintf(stderr,"Plik nie przejdzie walidacji Napisy24:\n  %s\n",prob); free(text); return 1; }
+    if(dry){ printf("[OK] dry-run: plik poprawny (nie wysłano)\n"); free(text); return 0; }
+    if(!n24_web_login(cfgpath)){ free(text); return 2; }
+    size_t fl; unsigned char*fb=n24_normalize_crlf(text,&fl); free(text);
+    int serial = m->season && m->season[0];
+    const char*bnd="----aqnapin24form"; SB b; sb_init(&b);
+    #define FT(nm,val) do{ sb_puts(&b,"--");sb_puts(&b,bnd);sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"");sb_puts(&b,nm);sb_puts(&b,"\"\r\n\r\n");sb_puts(&b,val?val:"");sb_puts(&b,"\r\n"); }while(0)
+    FT("form[form_typ]",serial?"Serial":"Film"); FT("form[form_dodajIMDB]",m->imdb);
+    FT("form[form_dodaj_tytul]",m->title); FT("form[form_dodaj_polskiTytul]",m->title_pl);
+    FT("form[form_dodaj_rok]",m->year); FT("form[form_dodaj_wydanie]",m->release); FT("form[form_dodaj_hash]","");
+    FT("form[form_dodaj_tlumaczenie]",m->translator); FT("form[form_dodaj_dopasowanie]",m->sync); FT("form[form_dodaj_korekta]",m->proof);
+    FT("form[form_dodaj_rozdzielczosc]",m->resolution); FT("form[form_dodaj_fps][]",m->fps?m->fps:"23.976");
+    FT("form[form_dodaj_jezyk][]","Polski"); FT("form[form_dodajIloscPlyt]","1");
+    FT("form[form_czas_cd1]",m->duration); FT("form[form_wielkosc_cd1]",m->size);
+    /* plik napisów + 3 puste sloty */
+    { const char*fn=basename_of(srt); sb_puts(&b,"--");sb_puts(&b,bnd);sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"form[form_dodajNapis1_plik]\"; filename=\"");sb_puts(&b,fn);sb_puts(&b,"\"\r\nContent-Type: application/octet-stream\r\n\r\n");sb_putn(&b,(char*)fb,fl);sb_puts(&b,"\r\n"); }
+    for(int i=2;i<=4;i++){ char nm[48]; snprintf(nm,sizeof nm,"form[form_dodajNapis%d_plik]",i); sb_puts(&b,"--");sb_puts(&b,bnd);sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"");sb_puts(&b,nm);sb_puts(&b,"\"; filename=\"\"\r\nContent-Type: application/octet-stream\r\n\r\n\r\n"); }
+    FT("form[dodajTlumaczenie]","Dodaj"); FT("form[formId]","7"); FT("form[remId]",""); FT("form[form_dodajTlumaczenieId]","0");
+    if(serial){ FT("form[realtxt]",m->title); FT("form[serial][]",m->imdb); FT("form[form_dodaj_nrSezonu]",m->season); FT("form[form_dodaj_nrOdcinka]",m->episode); FT("form[form_dodaj_tytulOdcinka]",m->episode_title); FT("form[form_dodaj_cover]","Serialu"); }
+    #undef FT
+    sb_puts(&b,"--");sb_puts(&b,bnd);sb_puts(&b,"--\r\n"); free(fb);
+    char ct[128]; snprintf(ct,sizeof ct,"Content-Type: multipart/form-data; boundary=%s\r\n",bnd);
+    int st; size_t n; char*resp=https_fetch("POST","napisy24.pl","/dodaj-napisy",ct,b.b,&st,&n,0); free(b.b);
+    int ok = resp && (strstr(resp,"Napisy Dodane/Zmienione")||strstr(resp,"dziękujemy")); free(resp);
+    printf("[%s] %s\n", ok?"OK":"BŁĄD", ok?"dodano/zmieniono":"serwer nie potwierdził dodania"); return ok?0:1;
+}
+static int cmd_n24_delete(const char*cfgpath,const char*id,const char*reason){
+    if(!id){ fprintf(stderr,"napisy24 delete wymaga ID\n"); return 2; }
+    if(!n24_web_login(cfgpath)) return 2;
+    char path[128]; snprintf(path,sizeof path,"/dodaj-napisy?usun=%s",id);
+    int st; size_t n; char*g=https_fetch("GET","napisy24.pl",path,NULL,NULL,&st,&n,0); free(g);
+    char*er=url_encode(reason?reason:"usuniecie napisu"); SB b; sb_init(&b); char t[256];
+    snprintf(t,sizeof t,"form[form_usunPowod]=%s&form[btnSend]=Usu%%C5%%84+napisy&form[usunId]=%s&form[formId]=8",er,id); sb_puts(&b,t); free(er);
+    char*resp=https_fetch("POST","napisy24.pl",path,"Content-Type: application/x-www-form-urlencoded\r\n",b.b,&st,&n,0); free(b.b);
+    int ok = resp && strstr(resp,"Napisy usunięte"); free(resp);
+    printf("[%s] %s\n", ok?"OK":"BŁĄD", ok?"usunięto":"nie potwierdzono usunięcia"); return ok?0:1;
+}
 #endif /* AQNAPI_TLS */
 
 static int cmd_update(int check){
@@ -1397,7 +1458,9 @@ static void usage(void){
 }
 
 int main(int argc,char**argv){
-    const char*cmd=NULL,*out=NULL,*movie=NULL,*lang=NULL,*fmt=NULL,*cfgpath=NULL,*title=NULL,*imdb=NULL,*query=NULL,*season=NULL,*episode=NULL;
+    const char*cmd=NULL,*out=NULL,*movie=NULL,*lang=NULL,*fmt=NULL,*cfgpath=NULL,*title=NULL,*imdb=NULL,*query=NULL,*season=NULL,*episode=NULL,
+        *release=NULL,*resolution=NULL,*duration=NULL,*a_size=NULL,*year=NULL,
+        *title_pl=NULL,*episode_title=NULL,*a_sync=NULL,*proof=NULL,*reason=NULL;
     double fps=0,from_fps=0,to_fps=0,maxd=0,mind=0;
     int keep_tags=0,strip_sdh=0,no_san=0,rebase=1,corrected=0,testing=0,check=0;
     const char*srt=NULL,*translator=NULL,*comment=NULL;
@@ -1416,6 +1479,16 @@ int main(int argc,char**argv){
         else if(!strcmp(a,"--query")){ if(++i<argc) query=argv[i]; }
         else if(!strcmp(a,"--season")){ if(++i<argc) season=argv[i]; }
         else if(!strcmp(a,"--episode")){ if(++i<argc) episode=argv[i]; }
+        else if(!strcmp(a,"--release")){ if(++i<argc) release=argv[i]; }
+        else if(!strcmp(a,"--resolution")){ if(++i<argc) resolution=argv[i]; }
+        else if(!strcmp(a,"--duration")){ if(++i<argc) duration=argv[i]; }
+        else if(!strcmp(a,"--size")){ if(++i<argc) a_size=argv[i]; }
+        else if(!strcmp(a,"--year")){ if(++i<argc) year=argv[i]; }
+        else if(!strcmp(a,"--title-pl")){ if(++i<argc) title_pl=argv[i]; }
+        else if(!strcmp(a,"--episode-title")){ if(++i<argc) episode_title=argv[i]; }
+        else if(!strcmp(a,"--sync")){ if(++i<argc) a_sync=argv[i]; }
+        else if(!strcmp(a,"--proof")){ if(++i<argc) proof=argv[i]; }
+        else if(!strcmp(a,"--reason")){ if(++i<argc) reason=argv[i]; }
         else if(!strcmp(a,"--srt")){ if(++i<argc) srt=argv[i]; }
         else if(!strcmp(a,"--translator")){ if(++i<argc) translator=argv[i]; }
         else if(!strcmp(a,"--comment")){ if(++i<argc) comment=argv[i]; }
@@ -1471,6 +1544,22 @@ int main(int argc,char**argv){
         if(!strcmp(sub,"getid")){ if(!a1){usage();return 2;} return cmd_n24_getid(a1,out,movie,fps,opt); }
         if(!strcmp(sub,"download")){ if(!a1){usage();return 2;} return cmd_n24_download(a1,lang,out,fps,opt); }
         if(!strcmp(sub,"search")){ return n24_search(imdb,title); }
+        if(!strcmp(sub,"upload")){
+#ifdef AQNAPI_TLS
+            char fpsb[16]=""; if(fps>0) snprintf(fpsb,sizeof fpsb,"%g",fps);
+            N24Meta m={imdb,title,title_pl,year,release,translator,a_sync,proof,resolution,duration,a_size,fpsb[0]?fpsb:NULL,season,episode,episode_title};
+            return cmd_n24_upload(cfgpath,srt,&m,testing);
+#else
+            fprintf(stderr,"napisy24 upload wymaga wariantu TLS (aqnapi-c-tls.com)\n"); return 2;
+#endif
+        }
+        if(!strcmp(sub,"delete")||!strcmp(sub,"rm")){
+#ifdef AQNAPI_TLS
+            return cmd_n24_delete(cfgpath,a1,reason);
+#else
+            fprintf(stderr,"napisy24 delete wymaga wariantu TLS (aqnapi-c-tls.com)\n"); return 2;
+#endif
+        }
         fprintf(stderr,"napisy24: '%s' nieobsługiwane w wersji C (użyj aqnapi.py)\n",sub); return 2; }
     if(!strcmp(cmd,"opensubtitles")||!strcmp(cmd,"os")){
 #ifdef AQNAPI_TLS

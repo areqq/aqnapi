@@ -38,6 +38,7 @@ oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`
 | `update [--check]` | **wariant TLS**: HTTPS do GitHub API przez mbedtls, porównanie wersji, podmiana binarki. `--check` zweryfikowany na żywo |
 | `opensubtitles login/search/download` | **wariant TLS**: pełny klient REST v1 (Api-Key + JWT), HTTPS przez mbedtls, parser JSON. **search i download bajtowo zgodne z Pythonem** (zweryfikowane kluczem na żywo) |
 | `napisy24 weblogin` | **wariant TLS**: logowanie WWW (Joomla/Community Builder `cb-login`) — cookie-jar + skrobanie tokena CSRF + sesja RSForm. Zweryfikowane na żywo („Zalogowano") |
+| `napisy24 upload/delete` | **wariant TLS**: upload przez formularz RSForm (multipart, walidacja lokalna ≤2 linie + normalizacja CRLF), delete `?usun=`. Bezpiecznie zweryfikowane: `--dry-run` (jak Python) + `delete` przez autoryzowaną sesję (bez realnego wpisu) |
 
 ## Dwa warianty binarki C
 
