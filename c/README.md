@@ -25,7 +25,7 @@ zakresie, który obejmuje.
 | `merge` (auto/`--offset`) | bajtowo |
 | `split --at [--no-rebase]` | bajtowo |
 | `config {init,show,path}` | plik i `show` bajtowo == Python (hasła bez echo, chmod 600) |
-| `sync REF TGT --offset\|--anchor` (nieinteraktywny) | plik + stdout bajtowo == `aqnapi sync` |
+| `sync REF TGT` | **interaktywny TUI** (termios+ANSI: 2 kolumny, TAB, ↑↓/jk, ENTER łączy pary, edycja czasów `,./<>e`, `a` zapis, `q` wyjście) oraz `--offset`/`--anchor` (nieinteraktywny, bajtowo == Python). TUI zweryfikowany przez pty |
 | `search` / `napiprojekt search` / `napisy24 search` (agreg. + per-serwis) | stdout bajtowo == Python (live) |
 | `get` (agregator np→n24, HTTP) | pobiera i zapisuje SRT |
 | `napiprojekt download` / `fileinfo` (HTTP) | bajtowo |
@@ -59,10 +59,10 @@ opensubtitles) przechodzą, a **podstawiony fałszywy CA jest odrzucany** (test
 negatywny). Fallback: systemowy `ca-certificates.crt`, ostatecznie brak
 weryfikacji, gdy bundla nie ma.
 
-**Jeszcze nie w C** (kolejne etapy): napisy24 WWW **upload/delete** (login/sesja
-już są — `weblogin`; brakuje formularza RSForm multipart i `?usun=`); napiprojekt
-`account`/`associate`, napisy24 `login`(CheckLogin — jest w wersji Python)/`imdb`;
-**interaktywny `sync`** (termios TUI).
+**Jeszcze nie w C** (drobne, kolejne etapy): napiprojekt `account`/`associate`
+(HTTP z hasłem jawnym), napisy24 `login` (CheckLogin — jest w wersji Python) i
+`imdb` (CheckIMDB). Wszystkie duże obszary (offline, downloady, upload 7z-AES,
+search, OpenSubtitles, napisy24 WWW, sync interaktywny, update, TLS+CA) są w C.
 
 > `iso-8859-2` jako drugorzędny fallback kodowania oraz kilka rzadkich, niezdefiniowanych
 > bajtów cp1250 są uproszczone względem Pythona (nie dotyczy typowych polskich napisów).

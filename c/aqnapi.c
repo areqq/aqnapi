@@ -22,9 +22,11 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <termios.h>
+#include <sys/ioctl.h>
 #include "third_party/zlib/zlib.h"
 
-#define VERSION "1.0.2"
+#define VERSION "1.0.3"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
@@ -1001,6 +1003,62 @@ static int cmd_split(const char*in,const char*out,char**at,int nat,int rebase,do
     printf("Podzielono na: %s%s\n",names.b, rebase?"  (czasy części wyzerowane)":""); free(names.b); return 0;
 }
 
+/* --- interaktywny sync (termios + ANSI, w obu buildach) --- */
+static int aq_readkey(void){ unsigned char c; if(read(0,&c,1)!=1) return -1; if(c!=0x1b) return c;
+    unsigned char b; if(read(0,&b,1)!=1) return 27; if(b!='['&&b!='O') return 27;
+    unsigned char d; if(read(0,&d,1)!=1) return 27;
+    switch(d){ case 'A':return 1000; case 'B':return 1001; case 'C':return 1002; case 'D':return 1003; case 'H':return 1006; case 'F':return 1007;
+        case '5':{unsigned char e; if(read(0,&e,1)!=1){} return 1004;} case '6':{unsigned char e; if(read(0,&e,1)!=1){} return 1005;} default:return 27; } }
+static void tui_line(SB*o,int row,int x,int colw,int rev,const char*s){ char h[700]; snprintf(h,sizeof h,"\033[%d;%dH%s%-*.*s\033[0m",row,x,rev?"\033[7m":"",colw,colw,s); sb_puts(o,h); }
+static int sync_tui(Cues*ref,Cues*tgt,Cues*wout,double*scale,double*offset){
+    if(!isatty(0)||!isatty(1)) return -2;
+    struct termios old,raw; tcgetattr(0,&old); raw=old; raw.c_lflag&=~(ICANON|ECHO); raw.c_cc[VMIN]=1; raw.c_cc[VTIME]=0; tcsetattr(0,TCSANOW,&raw);
+    Cues work; cues_init(&work); for(int i=0;i<tgt->n;i++){ Cue*q=cues_push(&work); q->start=tgt->a[i].start; q->end=tgt->a[i].end; for(int k=0;k<tgt->a[i].nlines;k++) cue_addline(q,tgt->a[i].lines[k],strlen(tgt->a[i].lines[k])); }
+    Cues*col[2]; col[0]=ref; col[1]=&work; const char*ttl[2]={"WZOR (referencja)","DO SYNCHRONIZACJI"};
+    int active=0,cursor[2]={0,0},top[2]={0,0},sel[2]={-1,-1}, li[512],ri[512],np=0, done=0,apply=0; char msg[120]="";
+    while(!done){
+        struct winsize ws; memset(&ws,0,sizeof ws); ioctl(1,TIOCGWINSZ,&ws);
+        int rows=ws.ws_row>0?ws.ws_row:24, cols=ws.ws_col>0?ws.ws_col:80, colw=(cols-3)/2; if(colw<12)colw=12; int body=rows-6; if(body<1)body=1;
+        for(int c=0;c<2;c++){ if(col[c]->n==0)cursor[c]=0; else { if(cursor[c]<0)cursor[c]=0; if(cursor[c]>=col[c]->n)cursor[c]=col[c]->n-1; } if(cursor[c]<top[c])top[c]=cursor[c]; if(cursor[c]>=top[c]+body)top[c]=cursor[c]-body+1; }
+        SB o; sb_init(&o); sb_puts(&o,"\033[2J\033[H");
+        tui_line(&o,1,1,colw,active==0,ttl[0]); tui_line(&o,1,colw+4,colw,active==1,ttl[1]);
+        for(int c=0;c<2;c++){ int x=(c==0)?1:colw+4; for(int row=0;row<body;row++){ int idx=top[c]+row; if(idx>=col[c]->n) break; Cue*cu=&col[c]->a[idx];
+            int pn=0; for(int p=0;p<np;p++){ if(c==0&&li[p]==idx)pn=p+1; if(c==1&&ri[p]==idx)pn=p+1; }
+            char mk=pn?('0'+pn%10):(sel[c]==idx?'>':' '); char tim[16]; ms_to_srt(cu->start,tim); tim[8]=0;
+            char txt[420]=""; for(int k=0;k<cu->nlines;k++){ if(k)strncat(txt," ",sizeof txt-strlen(txt)-1); strncat(txt,cu->lines[k],sizeof txt-strlen(txt)-1); }
+            char line[480]; snprintf(line,sizeof line,"%c%4d %s %s",mk,idx+1,tim,txt);
+            tui_line(&o,2+row,x,colw,(active==c&&cursor[c]==idx),line); } }
+        /* podgląd + status + pomoc */
+        for(int c=0;c<2;c++){ int idx=sel[c]>=0?sel[c]:cursor[c]; char pv[700]="-"; if(idx>=0&&idx<col[c]->n){ Cue*cu=&col[c]->a[idx]; char t1[16],t2[16]; ms_to_srt(cu->start,t1); ms_to_srt(cu->end,t2);
+            char txt[420]=""; for(int k=0;k<cu->nlines;k++){ if(k)strncat(txt," | ",sizeof txt-strlen(txt)-1); strncat(txt,cu->lines[k],sizeof txt-strlen(txt)-1); }
+            snprintf(pv,sizeof pv,"%s [%d] %s->%s  %s",c==0?"WZOR:":"CEL :",idx+1,t1,t2,txt); }
+            char h[760]; snprintf(h,sizeof h,"\033[%d;1H\033[2K\033[2m%.*s\033[0m",rows-3+c,cols-1,pv); sb_puts(&o,h); }
+        { long T[512],R[512]; int m=0; for(int p=0;p<np;p++){ T[m]=work.a[ri[p]].start; R[m]=ref->a[li[p]].start; m++; } double sc,of; sync_transform(T,R,m,&sc,&of);
+          char st[300]; snprintf(st,sizeof st,"\033[%d;1H\033[2K\033[7m par: %d   scale=%.4f  offset=%+.3fs   %s\033[0m",rows-1,np,sc,of/1000.0,msg); sb_puts(&o,st); }
+        { char hp[400]; snprintf(hp,sizeof hp,"\033[%d;1H\033[2KTAB kol | %sup/down%s ruch | ENTER zaznacz->laczy | u cofnij | CEL: ,/. +-0.1s  </> +-1s  e czas | a zapis | q wyjscie","",""); sb_puts(&o,hp); }
+        if(write(1,o.b,o.len)<0){} free(o.b); msg[0]=0;
+        int k=aq_readkey();
+        if(k==-1||k=='q'||k==27) done=1;
+        else if(k==9) active^=1;
+        else if(k==1000||k=='k') cursor[active]--;
+        else if(k==1001||k=='j') cursor[active]++;
+        else if(k==1004) cursor[active]-=body;
+        else if(k==1005) cursor[active]+=body;
+        else if(k==1006) cursor[active]=0;
+        else if(k==1007) cursor[active]=col[active]->n-1;
+        else if(k==13||k==10||k==' '){ sel[active]=cursor[active]; if(sel[0]>=0&&sel[1]>=0&&np<512){ li[np]=sel[0]; ri[np]=sel[1]; np++; sel[0]=sel[1]=-1; } }
+        else if(k=='u'){ if(np>0)np--; }
+        else if(k=='a'){ apply=1; done=1; }
+        else if(active==1 && (k==','||k=='.'||k=='<'||k=='>'||k=='e') && work.n>0){ Cue*cu=&work.a[cursor[1]]; long d=0;
+            if(k==',')d=-100; else if(k=='.')d=100; else if(k=='<')d=-1000; else if(k=='>')d=1000;
+            else { tcsetattr(0,TCSANOW,&old); struct winsize w2; ioctl(1,TIOCGWINSZ,&w2); printf("\033[%d;1H\033[2KNowy czas startu (hh:mm:ss,mmm | sek): ",w2.ws_row>0?w2.ws_row:24); fflush(stdout);
+                char buf[64]; if(fgets(buf,sizeof buf,stdin)){ long v=parse_user_time(buf); if(v>=0) d=v-cu->start; } tcsetattr(0,TCSANOW,&raw); }
+            cu->start+=d; if(cu->start<0)cu->start=0; cu->end+=d; if(cu->end<0)cu->end=0; } }
+    tcsetattr(0,TCSANOW,&old); if(write(1,"\033[2J\033[H",7)<0){}
+    if(!apply) return -1;
+    long T[512],R[512]; int m=0; for(int p=0;p<np;p++){ T[m]=work.a[ri[p]].start; R[m]=ref->a[li[p]].start; m++; } sync_transform(T,R,m,scale,offset); *wout=work; return 0;
+}
+
 static int cmd_sync(const char*ref,const char*tgt,const char*out,double off_sec,int has_off,char**anch,int nanch,double flag_fps){
     if(!ref||!tgt) die("sync wymaga dwóch plików: WZÓR CEL");
     double fps=flag_fps>0?flag_fps:DEFAULT_FPS;
@@ -1012,7 +1070,10 @@ static int cmd_sync(const char*ref,const char*tgt,const char*out,double off_sec,
             if(ri<1||ri>rc.n||ti<1||ti>tc.n){ char m[128]; snprintf(m,sizeof m,"--anchor %s: numer linii poza zakresem",anch[i]); die(m);}
             T[np]=tc.a[ti-1].start; R[np]=rc.a[ri-1].start; np++; }
         sync_transform(T,R,np,&scale,&offset);
-    } else die("Interaktywny sync jeszcze nie w wersji C — użyj --offset SEK lub --anchor R,T.");
+    } else { Cues work; double sc,of; int r=sync_tui(&rc,&tc,&work,&sc,&of);
+        if(r==-2) die("Interaktywny sync wymaga terminala — użyj --offset SEK lub --anchor R,T.");
+        if(r!=0){ printf("Anulowano — nic nie zapisano.\n"); return 1; }
+        tc=work; scale=sc; offset=of; }
     Cues syn; apply_sync_c(&tc,scale,offset,&syn);
     char defname[512]; char*outp; if(out){ outp=xmalloc(strlen(out)+1); strcpy(outp,out); }
     else { const char*dot=strrchr(tgt,'.'); size_t b=dot?(size_t)(dot-tgt):strlen(tgt); snprintf(defname,sizeof defname,"%.*s.synced.srt",(int)b,tgt); outp=xmalloc(strlen(defname)+1); strcpy(outp,defname); }
