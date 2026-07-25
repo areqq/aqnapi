@@ -237,11 +237,13 @@ Istnieje też niezależny **natywny port w C** (`c/aqnapi.c`, kompilowany przez
 z wersją Python (dla zaimplementowanego podzbioru): offline `hash`, `fps`,
 `convert`, `fpsconv`, `merge`, `split`, `sync` (nieinteraktywny); sieć po HTTP
 `download`/`get`, `napiprojekt` (download/fileinfo/**upload** 7z-AES, **`--login`**),
-`napisy24` (download/getid/search/**attach** AddSubPrg); wejście z **URL** (Range).
-Wariant **TLS** (`aqnapi-c-tls.com`, monorepo Cosmopolitan + mbedtls) dodaje
-HTTPS: `opensubtitles`, `napisy24 weblogin/upload/delete`, `update` oraz URL
-`https://`. Poza portem zostaje interaktywny TUI `sync` (curses) i `config`.
-Pełna macierz pokrycia: [`c/README.md`](c/README.md).
+`napisy24` (download/getid/search/**attach** AddSubPrg); wejście z **URL** (Range);
+`sync` (interaktywny TUI termios+ANSI oraz `--offset`/`--anchor`) i `config`
+(init/show/path). Wariant **TLS** (`aqnapi-c-tls.com`, monorepo Cosmopolitan +
+mbedtls) dodaje HTTPS: `opensubtitles`, `napisy24 weblogin/upload/delete`,
+`update` oraz URL `https://`. Nie przeniesione (użyj `aqnapi.py`): agregujący
+`upload`, napiprojekt `associate`/`account`, napisy24 `login`(klient)/`imdb`,
+opensubtitles `logout`/`guessit`. Pełna macierz: [`c/README.md`](c/README.md).
 
 ## Testy
 

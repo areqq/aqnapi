@@ -7,8 +7,10 @@ APE (`dist/aqnapi-c.com`) działającej na Linux/macOS/Windows/*BSD (x86-64+ARM6
 To **pełny natywny port** obok wersji Python (`aqnapi.py`) — pokrywa **większość
 poleceń** i jest **100% bajtowo zgodny** z Pythonem dla zaimplementowanego
 podzbioru. Wersja Python pozostaje kompletna i referencyjna; każda zmiana idzie
-w OBU wersjach (zob. `CLAUDE.md`). Świadomie poza portem: interaktywny TUI
-`sync` (curses) i `config`.
+w OBU wersjach (zob. `CLAUDE.md`). `sync` (interaktywny TUI termios+ANSI oraz
+`--offset`/`--anchor`) i `config` (init/show/path) SĄ tutaj. Nie przeniesione
+(użyj `aqnapi.py`): agregujący `upload`, napiprojekt `associate`/`account`,
+napisy24 `login`(klient)/`imdb`, opensubtitles `logout`/`guessit`.
 
 ## Zakres (stan bieżący)
 

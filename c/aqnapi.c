@@ -1,17 +1,16 @@
-/* aqnapi (wersja C, POC) — niezależna, maksymalnie zgodna reimplementacja
- * podzbioru aqnapi.py, kompilowana przez cosmocc do uniwersalnej binarki APE.
+/* aqnapi (wersja C) — niezależny, natywny port aqnapi.py, kompilowany przez
+ * cosmocc do uniwersalnej binarki APE. Pokrywa WIĘKSZOŚĆ poleceń i jest 100%
+ * bajtowo zgodny z Pythonem dla zaimplementowanego podzbioru.
  *
- * Zakres POC (bajtowo zgodny z aqnapi.py):
- *   hash FILE                 — OSH + MD5(10MiB)
- *   fps  FILE                 — FPS z MKV / AVI / MP4-MOV
- *   convert IN [-o OUT] [--fps F]   — SRT/MicroDVD/VTT -> SRT (UTF-8+BOM, LF)
- *                                     z tą samą sanityzacją co Python
- *   download FILE [-l PL] [-o OUT] [--fps F]
- *                             — pobranie z napiprojekt (mode=1, HTTP) -> SRT
+ * Offline: hash, fps, convert, fpsconv, merge, split, sync, config.
+ * Sieć (HTTP, oba buildy): download, get, search, napiprojekt
+ *   (download/fileinfo/search/upload 7z-AES + --login), napisy24
+ *   (hash/download/getid/search/attach AddSubPrg). Wejście z URL (Range).
+ * Wariant TLS (aqnapi-c-tls.com, monorepo + mbedtls) dodaje HTTPS: opensubtitles
+ *   (login/search/download), napisy24 weblogin/upload/delete, update, URL https.
  *
- * Poza zakresem POC (pozostaje w wersji Python): OpenSubtitles (TLS),
- * napisy24 (ZIP/formularz WWW), 7z-AES upload, sync (curses), ASS/MPL2/TMPlayer,
- * transkodowanie cp1250/iso-8859-2 (POC zakłada wejście UTF-8).
+ * Nie przeniesione (użyj aqnapi.py): agregujący `upload`, napiprojekt
+ * associate/account, napisy24 login(klient)/imdb, opensubtitles logout/guessit.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,7 +25,7 @@
 #include <sys/ioctl.h>
 #include "third_party/zlib/zlib.h"
 
-#define VERSION "1.0.7"
+#define VERSION "1.0.8"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
