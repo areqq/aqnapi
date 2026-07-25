@@ -129,6 +129,23 @@ szczegółów protokołów.
   (`raw_http10_post`), a webapi/upload/delete idą przez `urllib` (HTTPS).
 - **napiprojekt pole pliku uploadu = `subtitles`** (małą literą!). Wielka litera
   → „Brak pliku z napisami".
+- **Parytet C↔Python przy odpowiedziach serwera — dwa nieoczywiste helpery:**
+  (1) odpowiedzi napisy24 przez `/run/` dekoduj `utf8_replace` w C (odtwarza
+  CPython `bytes.decode("utf-8", errors="replace")` — substytucja maksymalnych
+  podciągów przez U+FFFD; inaczej `premieres`/`trans` rozjeżdżają się na
+  krzakach). (2) `xml_first` w C **zdejmuje CDATA** literalnie (bez unescape),
+  jak ElementTree — inaczej `cover` (mode=2) pokazuje `<![CDATA[...]]>` i psuje
+  base64 okładki.
+- **napiprojekt `info` (mode=8) świadomie pominięty w OBU wersjach** — wymaga
+  zewnętrznego binarium `mediainfo` (subprocess), co łamie zasadę „tylko stdlib,
+  bez zewnętrznych binarek". Reszta trybów jest: `cover`/2, `version`/16,
+  `report`/64 (user_nick/user_password), obok download/1, upload/512+1024,
+  file_info, associate, account.
+- **napisy24 nowe polecenia klienta** (przez `/run/<endpoint>`, pola `n24_obf`):
+  `mediainfo`→ChangeData.php, `notify`→Notifiemail/NotifiSMS.php,
+  `trans`→Get/SetTrans.php, `premieres`→GetIMDB.php, `edit`→WWW `?edytuj=`
+  (scraper RSForm, wariant TLS). `lp` (id rekordu do mediainfo) z nagłówka
+  CheckSub2.
 - **napiprojekt `client` MUSI być z whitelisty** serwera. Nieznana nazwa (np.
   `aqnapi`) → upload zwraca `<error><client> odmowa dostępu</error>`. Używamy
   **`pynapi`** (`CLIENT`/`client` w download i upload). Nazwy per-tryb:

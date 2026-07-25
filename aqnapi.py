@@ -38,7 +38,7 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.0.12"
+__version__ = "1.0.13"
 USER_AGENT_OS = f"aqnapi v{__version__}"
 
 __all__ = [
@@ -2392,6 +2392,104 @@ class NapiprojektClient:
                 out[f"{parent.tag}.{child.tag}"] = (child.text or "").strip()
         return out
 
+    # ---- mode=2 / 16 / 64: okładka / wersja klienta / zgłoszenie ----
+
+    def get_movie_info(self, movie_hash: str) -> Optional[dict]:
+        """mode=2 — film skojarzony z hashem (okładka + ocena). None gdy brak."""
+        import xml.etree.ElementTree as ET
+        xml = self._post([("mode", "2"), ("downloaded_cover_id", movie_hash)])
+        try:
+            root = ET.fromstring(xml.strip())
+        except ET.ParseError:
+            return None
+        mv = root.find("movie")
+        if mv is None or (mv.findtext("status") or "").strip().lower() != "success":
+            return None
+        links = mv.find("direct_links")
+        assoc = mv.find("file_assocation")
+
+        def lt(parent, tag):
+            return (parent.findtext(tag) or "").strip() if parent is not None else ""
+
+        cover = b""
+        cb = (mv.findtext("cover") or "").strip()
+        if cb:
+            try:
+                cover = base64.b64decode(cb)
+            except Exception:
+                cover = b""
+        return {
+            "movie_id": (mv.findtext("id") or "").strip(),
+            "title": (mv.findtext("title") or "").strip(),
+            "year": (mv.findtext("year") or "").strip(),
+            "imdb": lt(links, "imdb_com"),
+            "filmweb": lt(links, "filmweb_pl"),
+            "rating": (mv.findtext("rating") or "").strip(),
+            "votes": (mv.findtext("votes") or "").strip(),
+            "cover_jpeg": cover,
+            "associated_by": lt(assoc, "nick"),
+        }
+
+    def get_version_info(self) -> dict:
+        """mode=16 — informacje o najnowszej wersji klienta."""
+        import xml.etree.ElementTree as ET
+        xml = self._post([("mode", "16")])
+        try:
+            root = ET.fromstring(xml.strip())
+        except ET.ParseError:
+            return {"version": "", "download_url": "", "changes": ""}
+        node = root.find("update_info")
+        node = node if node is not None else root
+        return {
+            "version": (node.findtext("version_number") or "").strip(),
+            "download_url": (node.findtext("download_url") or "").strip(),
+            "changes": (node.findtext("latest_changes") or "").strip(),
+        }
+
+    def report_bad(self, user, password, movie_hash, lang, problem_kind,
+                   comment="", video_file="") -> UploadResult:
+        """mode=64 — zgłoś złe napisy (wymaga loginu i hasła)."""
+        import xml.etree.ElementTree as ET
+        if not user or not password:
+            raise AuthError("Zgłoszenie wymaga loginu i hasła.")
+        fields = [
+            ("mode", "64"),
+            ("user_nick", user),
+            ("user_password", np_encode_password(password)),
+            ("RBS_FileHash", movie_hash),
+            ("RBS_VideoFile", video_file),
+            ("RBS_Lang", lang.upper()),
+            ("RBS_ProblemKind", str(problem_kind)),
+            ("RBS_ProblemPercent", ""),
+            ("RBS_ProblemPlayer", ""),
+            ("RBS_ProblemComment", comment),
+        ]
+        xml = self._post(fields)
+        try:
+            root = ET.fromstring(xml.strip())
+        except ET.ParseError as e:
+            raise ServerError(f"Zła odpowiedź XML: {e}") from e
+        status = (root.findtext("status") or "ok").strip()
+        error = (root.findtext("error") or "").strip()
+        if error:
+            raise ServerError(error)
+        return UploadResult("napiprojekt", status.lower() in ("ok", "success", "uploaded"),
+                            status, xml[:300])
+
+
+#: Rodzaje problemów do zgłaszania złych napisów (mode=64).
+NP_PROBLEM_KINDS = [
+    "Napisy nie są w ogóle wyświetlane",
+    "Napisy są do tego filmu, ale wyświetlają się w nieodpowiednim momencie",
+    "Napisy są do zupełnie innego filmu",
+    "Napisy są przetłumaczone przez komputer - translator",
+    "Napisy mają złe kodowanie, krzaki zamiast polskich liter",
+    "Jest tylko część napisów",
+    "Program pobrał napisy w innym języku, niż to było ustawione",
+    "Gdy włączam film napisy pojawiają mi się podwójnie",
+    "Inny powód",
+]
+
 
 # ===========================================================================
 # Klient: OpenSubtitles.com (REST API v1)
@@ -3803,6 +3901,47 @@ def cmd_np(args, cfg):
         r = _np_upload(args, cfg, decode_text(read_input_bytes(args.srt)))
         print(f"[{'OK' if r.ok else 'BŁĄD'}] {r.message}")
         return 0 if r.ok else 1
+    if args.np_cmd == "cover":
+        info = client.get_movie_info(md5_10mb(args.movie))
+        if info is None:
+            print("Plik nie jest skojarzony z żadnym filmem (brak okładki).", file=sys.stderr)
+            return 2
+        print(f"Film: {info['title']} ({info['year']})")
+        print(f"  MovieId: {info['movie_id']}")
+        if info["rating"]:
+            print(f"  Ocena: {info['rating']} ({info['votes']} głosów)")
+        if info["imdb"]:
+            print(f"  IMDB: {info['imdb']}")
+        if info["associated_by"]:
+            print(f"  Skojarzył: {info['associated_by']}")
+        if args.output and info["cover_jpeg"]:
+            with open(args.output, "wb") as f:
+                f.write(info["cover_jpeg"])
+            print(f"  Okładka zapisana ({len(info['cover_jpeg'])} B): {args.output}")
+        elif info["cover_jpeg"]:
+            print(f"  Okładka: {len(info['cover_jpeg'])} B (użyj -o by zapisać)")
+        return 0
+    if args.np_cmd == "version":
+        info = client.get_version_info()
+        print(f"Najnowsza wersja: {info['version']}")
+        print(f"Pobierz: {info['download_url']}")
+        if info["changes"]:
+            print("Zmiany:\n" + info["changes"])
+        return 0
+    if args.np_cmd == "report":
+        if args.list:
+            for i, k in enumerate(NP_PROBLEM_KINDS):
+                print(f"  {i}: {k}")
+            return 0
+        if not 0 <= args.kind < len(NP_PROBLEM_KINDS):
+            print(f"Zły --kind (0-{len(NP_PROBLEM_KINDS)-1})", file=sys.stderr)
+            return 4
+        r = client.report_bad(cfg.np_user(args.np_user), cfg.np_pass(args.np_pass),
+                              md5_10mb(args.movie), args.lang, args.kind,
+                              comment=args.comment or "",
+                              video_file=os.path.basename(args.movie))
+        print(f"Zgłoszono ({NP_PROBLEM_KINDS[args.kind]}): status={r.message}")
+        return 0
     return 2
 
 
@@ -4077,6 +4216,17 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("--login", action="store_true",
                     help="upload z logowaniem (przypisany do konta; user_nick/user_password)")
     pu.add_argument("--dry-run", action="store_true", dest="dry_run"); add_creds(pu)
+    pcv = nps.add_parser("cover", help="okładka + ocena filmu skojarzonego z plikiem (mode=2)")
+    pcv.add_argument("movie"); pcv.add_argument("-o", "--output", help="zapisz okładkę JPEG do pliku")
+    add_creds(pcv)
+    pver = nps.add_parser("version", help="info o najnowszej wersji klienta (mode=16)")
+    add_creds(pver)
+    prp = nps.add_parser("report", help="zgłoś złe napisy (mode=64, wymaga konta)")
+    prp.add_argument("movie", nargs="?", default="")
+    prp.add_argument("--kind", type=int, default=0, help="rodzaj problemu (patrz --list)")
+    prp.add_argument("--list", action="store_true", help="wypisz rodzaje problemów")
+    prp.add_argument("--comment", default=""); prp.add_argument("-l", "--lang", default="PL")
+    add_creds(prp)
     npp.set_defaults(func=cmd_np)
 
     # ---- per-serwis: opensubtitles ----
