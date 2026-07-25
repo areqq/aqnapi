@@ -38,7 +38,7 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.0.7"
+__version__ = "1.0.8"
 USER_AGENT_OS = f"aqnapi v{__version__}"
 
 __all__ = [
@@ -2761,7 +2761,11 @@ def cmd_config(args, cfg):
         if not cp.sections():
             print(f"(pusty lub brak pliku: {path})")
             return 0
-        for sect in cp.sections():
+        # stała kolejność kanoniczna (parytet z wersją C), potem ewentualne inne
+        _order = ["napisy24", "napiprojekt", "opensubtitles"]
+        sections = ([s for s in _order if cp.has_section(s)]
+                    + [s for s in cp.sections() if s not in _order])
+        for sect in sections:
             print(f"[{sect}]")
             for k, v in cp.items(sect):
                 shown = ("*" * len(v)) if (k in ("pass", "password") and v) else v

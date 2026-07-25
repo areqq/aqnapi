@@ -184,9 +184,12 @@ sieć po HTTP `download`/`get`, `napiprojekt` (download/fileinfo/upload 7z-AES/
 (Range). Wariant **TLS** (`c/build-tls.sh` → `dist/aqnapi-c-tls.com`, monorepo
 Cosmopolitan + mbedtls) dodaje HTTPS: `opensubtitles`, `napisy24 weblogin/upload/
 delete`, `update`, URL `https://`. C ma własne MD5/OSH/SHA-256/AES-256/7z/base64/
-HTTP(S)/silnik napisów. **Przy KAŻDEJ zmianie w `aqnapi.py` pilnuj parności C**
-(`diff` wyjść, testy live). Świadomie poza portem: interaktywny TUI `sync`
-(curses/termios ANSI — jest, ale nieinteraktywny tor) i `config`.
+HTTP(S)/silnik napisów. `sync` (interaktywny TUI termios+ANSI oraz
+`--offset`/`--anchor`) i `config` (init/show/path, chmod 600) SĄ w porcie —
+bajtowo zgodne. **Przy KAŻDEJ zmianie w `aqnapi.py` pilnuj parności C**
+(`diff` wyjść, testy live). Nie przeniesione (użyj `aqnapi.py`): agregujący
+`upload`, napiprojekt `associate`/`account`, napisy24 `login`(klient)/`imdb`,
+opensubtitles `logout`/`guessit`.
 
 Krytyczne dla zgodności z APE: nie wprowadzaj zależności od **`lzma`** ani
 **`ctypes`** — te moduły nie są wkompilowane w APE Pythona (reszta stdlib, w tym
