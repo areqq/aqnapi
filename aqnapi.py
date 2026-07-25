@@ -38,7 +38,7 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 USER_AGENT_OS = f"aqnapi v{__version__}"
 
 __all__ = [
@@ -1734,7 +1734,7 @@ class Napisy24Client:
             "ap": self.AGENT_AP,
             "fh": oshash(path).upper(),
             "md": md5_10mb(path),
-            "fs": str(os.path.getsize(path)),
+            "fs": str(input_size(path)),
             "fn": os.path.basename(path),
             "nl": lang,
         }
@@ -1751,7 +1751,7 @@ class Napisy24Client:
             "postVer": self.CLIENT_VER,
             "fh": n24_obf(oshash(path).upper()),
             "md": n24_obf(md5_10mb(path)),
-            "fs": n24_obf(str(os.path.getsize(path))),
+            "fs": n24_obf(str(input_size(path))),
             "fn": n24_obf(os.path.basename(path)),
             "nl": n24_obf(lang),
             "n24pref": "1" if prefer_best else "0",
