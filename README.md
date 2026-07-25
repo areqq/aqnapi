@@ -232,9 +232,16 @@ cosmo/build.sh            # -> dist/aqnapi.com
 
 Szczegóły, uruchamianie per platforma i weryfikacja: [`cosmo/README.md`](cosmo/README.md).
 
-Istnieje też niezależny **natywny POC w C** (`c/aqnapi.c`, kompilowany przez
-`cosmocc`) — podzbiór poleceń (`hash`, `fps`, `convert`, `download`) **bajtowo
-zgodny** z wersją Python. Zob. [`c/README.md`](c/README.md).
+Istnieje też niezależny **natywny port w C** (`c/aqnapi.c`, kompilowany przez
+`cosmocc`) — implementuje **większość poleceń** i jest **100% bajtowo zgodny**
+z wersją Python (dla zaimplementowanego podzbioru): offline `hash`, `fps`,
+`convert`, `fpsconv`, `merge`, `split`, `sync` (nieinteraktywny); sieć po HTTP
+`download`/`get`, `napiprojekt` (download/fileinfo/**upload** 7z-AES, **`--login`**),
+`napisy24` (download/getid/search/**attach** AddSubPrg); wejście z **URL** (Range).
+Wariant **TLS** (`aqnapi-c-tls.com`, monorepo Cosmopolitan + mbedtls) dodaje
+HTTPS: `opensubtitles`, `napisy24 weblogin/upload/delete`, `update` oraz URL
+`https://`. Poza portem zostaje interaktywny TUI `sync` (curses) i `config`.
+Pełna macierz pokrycia: [`c/README.md`](c/README.md).
 
 ## Testy
 
