@@ -30,7 +30,7 @@ zakresie, który obejmuje.
 | `get` (agregator np→n24, HTTP) | pobiera i zapisuje SRT |
 | `napiprojekt download` / `fileinfo` (HTTP) | bajtowo |
 | `napisy24 download` (CheckSubAgent+ZIP) / `getid` (download.php+ZIP) | **plik+stdout bajtowo** (ZIP-inflate przez zlib) |
-| `napiprojekt upload` (mode=512/1024, **7z-AES**) | własny AES-256+SHA-256+kontener 7z; **archiwum rozpakowywalne przez `7z x`**; odpowiedź serwera == Python |
+| `napiprojekt upload` (mode=512/1024, **7z-AES**, `--login`) | własny AES-256+SHA-256+kontener 7z; **archiwum rozpakowywalne przez `7z x`**; `--login` → pola `user_nick`/`user_password` (upload przypisany do konta); odpowiedź serwera == Python |
 
 Własna kryptografia zweryfikowana: **AES-256 (wektor FIPS-197)**, **SHA-256**,
 oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`).

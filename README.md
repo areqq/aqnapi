@@ -232,6 +232,9 @@ pomijany).
 aqnapi napiprojekt upload --srt film.srt --movie film.mkv -l PL --translator "ja" --dry-run
 aqnapi napiprojekt upload --srt film.srt --movie film.mkv -l PL --translator "ja"
 
+# napiprojekt: upload przypisany do konta (--login; login/hasło z [napiprojekt] w konfiguracji)
+aqnapi napiprojekt upload --srt film.srt --movie film.mkv --login
+
 # napiprojekt: poprawki (mode=1024)
 aqnapi napiprojekt upload --srt film.srt --movie film.mkv --corrected --comment "lepsza synchronizacja"
 

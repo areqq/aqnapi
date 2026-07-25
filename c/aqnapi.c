@@ -26,7 +26,7 @@
 #include <sys/ioctl.h>
 #include "third_party/zlib/zlib.h"
 
-#define VERSION "1.0.3"
+#define VERSION "1.0.4"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
@@ -725,7 +725,7 @@ static char* http_request(const char*host,const char*req,size_t reqlen,size_t*bo
 static unsigned char* np_download(const char*movie_hash,const char*lang,size_t*outlen){
     const char*host="www.napiprojekt.pl"; const char*boundary="----aqnapicafe0001";
     SB b; sb_init(&b);
-    const char*fields[][2]={{"client","aqnapi"},{"client_ver",VERSION},{"mode","1"},
+    const char*fields[][2]={{"client","pynapi"},{"client_ver",VERSION},{"mode","1"},
         {"downloaded_subtitles_id",movie_hash},{"downloaded_subtitles_lang",lang},{"downloaded_subtitles_txt","1"}};
     for(int i=0;i<6;i++){ sb_puts(&b,"--"); sb_puts(&b,boundary); sb_puts(&b,"\r\n");
         sb_puts(&b,"Content-Disposition: form-data; name=\""); sb_puts(&b,fields[i][0]); sb_puts(&b,"\"\r\n\r\n");
@@ -756,15 +756,26 @@ static double np_file_info_fps(const char*movie_hash){
 }
 
 /* napiprojekt upload (mode=512/1024) — multipart z archiwum 7z-AES; zwraca XML (malloc) */
+static char* b64encode(const unsigned char*in,size_t n){ static const char*T="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    char*out=xmalloc((n+2)/3*4+1); size_t o=0;
+    for(size_t i=0;i<n;i+=3){ unsigned v=(unsigned)in[i]<<16; int pad=0; if(i+1<n)v|=(unsigned)in[i+1]<<8; else pad++; if(i+2<n)v|=in[i+2]; else pad++;
+        out[o++]=T[(v>>18)&63]; out[o++]=T[(v>>12)&63]; out[o++]=pad>=2?'=':T[(v>>6)&63]; out[o++]=pad>=1?'=':T[v&63]; }
+    out[o]=0; return out; }
+/* hasło napiprojekt: XOR kluczem 3 -> base64 (jak encode_password / user_password) */
+static char* np_encode_password(const char*pw){ size_t n=strlen(pw); unsigned char*x=xmalloc(n?n:1); for(size_t i=0;i<n;i++) x[i]=(unsigned char)pw[i]^3; char*e=b64encode(x,n); free(x); return e; }
+/* napiprojekt upload. authenticate!=0 -> przypisz do konta (user_nick/user_password MAŁĄ literą, XOR+base64). */
 static char* np_upload_http(const char*movie_hash,const unsigned char*subbytes,size_t sublen,
-                            const char*lang,const char*author,int corrected,const char*comment,int testing){
+                            const char*lang,const char*author,int corrected,const char*comment,int testing,
+                            int authenticate,const char*user,const char*password){
     char entry[64],arcname[64]; snprintf(entry,sizeof entry,"%s.txt",movie_hash); snprintf(arcname,sizeof arcname,"%s.zip",movie_hash);
     size_t arclen; unsigned char*arc=write_7z_aes(entry,subbytes,sublen,&arclen);
     char subs_md5[33]; md5_bytes(subbytes,sublen,subs_md5);
+    const char*eauthor = (author&&author[0]) ? author : ((authenticate&&user)?user:"");  /* pusty autor -> login */
     const char*bnd="----aqnapicafe0002"; SB b; sb_init(&b);
     #define TF(name,val) do{ sb_puts(&b,"--"); sb_puts(&b,bnd); sb_puts(&b,"\r\nContent-Disposition: form-data; name=\""); sb_puts(&b,name); sb_puts(&b,"\"\r\n\r\n"); sb_puts(&b,val); sb_puts(&b,"\r\n"); }while(0)
-    TF("client","aqnapi"); TF("client_ver",VERSION); TF("mode",corrected?"1024":"512");
-    TF("SubtitlesHash",subs_md5); TF("SubtitlesAutor",author?author:""); TF("SubtitlesLang",lang);
+    TF("client","pynapi"); TF("client_ver",VERSION); TF("mode",corrected?"1024":"512");
+    TF("SubtitlesHash",subs_md5); TF("SubtitlesAutor",eauthor); TF("SubtitlesLang",lang);
+    if(authenticate && user && user[0] && password){ TF("user_nick",user); char*ep=np_encode_password(password); TF("user_password",ep); free(ep); }
     if(comment&&comment[0]) TF("SubtitlesComment",comment); if(testing) TF("OnlyTesting","1");
     #undef TF
     sb_puts(&b,"--"); sb_puts(&b,bnd); sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"subtitles\"; filename=\"");
@@ -1209,13 +1220,18 @@ static int np_search(const char*title){
     return 0;
 }
 
-static int cmd_np_upload(const char*movie,const char*srt,const char*lang,const char*author,int corrected,const char*comment,int testing){
+static int cmd_np_upload(const char*cfgpath,const char*movie,const char*srt,const char*lang,const char*author,int corrected,const char*comment,int testing,int authenticate){
     if(!movie||!srt) die("napiprojekt upload wymaga --movie i --srt");
+    char user[128]="",pass[128]="";
+    if(authenticate){ Ini ini; ini_load(config_path(cfgpath),&ini);
+        snprintf(user,sizeof user,"%s",ini_get(&ini,1,"user")); snprintf(pass,sizeof pass,"%s",ini_get(&ini,1,"pass"));
+        const char*eu=getenv("NAPI_USER"),*ep=getenv("NAPI_PASS"); if(eu&&*eu)snprintf(user,sizeof user,"%s",eu); if(ep&&*ep)snprintf(pass,sizeof pass,"%s",ep);
+        if(!user[0]||!pass[0]){ fprintf(stderr,"Błąd uwierzytelnienia: Upload z logowaniem wymaga loginu i hasła.\n"); return 2; } }
     size_t n; char*raw=read_file(srt,&n); if(!raw){ fprintf(stderr,"Brak pliku: %s\n",srt); return 1; }
     char*text=decode_text((unsigned char*)raw,n); free(raw); size_t sl=strlen(text);
     char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); free(text); return 1; }
     char L[8]; snprintf(L,sizeof L,"%s",lang?lang:"PL"); for(char*p=L;*p;p++)*p=toupper((unsigned char)*p);
-    char*xml=np_upload_http(md,(unsigned char*)text,sl,L,author,corrected,comment,testing); free(text);
+    char*xml=np_upload_http(md,(unsigned char*)text,sl,L,author,corrected,comment,testing,authenticate,user[0]?user:NULL,pass[0]?pass:NULL); free(text);
     if(!xml) die("napiprojekt: błąd połączenia");
     char*st=xml_first(xml,"status"),*wr=xml_first(xml,"warning"),*er=xml_first(xml,"error");
     int ok=!strcasecmp(st,"uploaded")||!strcasecmp(st,"success")||!strcasecmp(st,"ok");
@@ -1514,8 +1530,11 @@ static void usage(void){
         "  aqnapi merge PLIK PLIK [...] [-o WYJ] [--offset S ...] [--format ...]\n"
         "  aqnapi split WEJŚCIE --at CZAS [--at CZAS ...] [-o BAZA] [--no-rebase] [--format ...]\n"
         "  aqnapi download FILM [-l PL] [-o WYJ] [--fps F]      (napiprojekt, HTTP)\n"
+        "  aqnapi napiprojekt upload --movie FILM --srt PLIK [-l PL] [--translator A]\n"
+        "                            [--corrected] [--comment K] [--login] [--dry-run]\n"
         "  aqnapi --version | --help\n"
-        "POC w C: sieć/TLS (OpenSubtitles, napisy24 WWW), 7z-upload i sync — w wersji Python.\n", VERSION);
+        "napiprojekt upload buduje 7z-AES natywnie w C; --login przypisuje do konta.\n"
+        "TLS (OpenSubtitles, napisy24 WWW) i interaktywny sync — w wariancie aqnapi-c-tls.com / Python.\n", VERSION);
 }
 
 int main(int argc,char**argv){
@@ -1523,7 +1542,7 @@ int main(int argc,char**argv){
         *release=NULL,*resolution=NULL,*duration=NULL,*a_size=NULL,*year=NULL,
         *title_pl=NULL,*episode_title=NULL,*a_sync=NULL,*proof=NULL,*reason=NULL;
     double fps=0,from_fps=0,to_fps=0,maxd=0,mind=0;
-    int keep_tags=0,strip_sdh=0,no_san=0,rebase=1,corrected=0,testing=0,check=0;
+    int keep_tags=0,strip_sdh=0,no_san=0,rebase=1,corrected=0,testing=0,check=0,do_login=0;
     const char*srt=NULL,*translator=NULL,*comment=NULL;
     char*files[64]; int nfiles=0; double offs[32]; int noff=0; char*ats[64]; int nat=0; char*anch[64]; int nanch=0;
     /* parsowanie niezależne od pozycji (flagi globalne mogą być przed poleceniem) */
@@ -1556,6 +1575,7 @@ int main(int argc,char**argv){
         else if(!strcmp(a,"--corrected")) corrected=1;
         else if(!strcmp(a,"--test")||!strcmp(a,"--dry-run")) testing=1;
         else if(!strcmp(a,"--check")) check=1;
+        else if(!strcmp(a,"--login")) do_login=1;
         else if(!strcmp(a,"--fps")){ if(++i<argc) fps=atof(argv[i]); }
         else if(!strcmp(a,"--from")){ if(++i<argc) from_fps=atof(argv[i]); }
         else if(!strcmp(a,"--to")){ if(++i<argc) to_fps=atof(argv[i]); }
@@ -1591,7 +1611,7 @@ int main(int argc,char**argv){
         if(!strcmp(sub,"download")){ if(!a1){usage();return 2;} return cmd_download(a1,lang,out,fps,opt); }
         if(!strcmp(sub,"fileinfo")){ if(!a1){usage();return 2;} return cmd_np_fileinfo(a1); }
         if(!strcmp(sub,"search")){ const char*t=a1?a1:(title?title:query); if(!t){usage();return 2;} return np_search(t); }
-        if(!strcmp(sub,"upload")){ return cmd_np_upload(movie,srt,lang,translator,corrected,comment,testing); }
+        if(!strcmp(sub,"upload")){ return cmd_np_upload(cfgpath,movie,srt,lang,translator,corrected,comment,testing,do_login); }
         fprintf(stderr,"napiprojekt: '%s' nieobsługiwane w wersji C (użyj aqnapi.py)\n",sub); return 2; }
     if(!strcmp(cmd,"napisy24")||!strcmp(cmd,"n24")){ const char*sub=nfiles>0?files[0]:NULL,*a1=nfiles>1?files[1]:NULL; if(!sub){usage();return 2;}
         if(!strcmp(sub,"hash")){ if(!a1){usage();return 2;} return cmd_hash(a1); }
