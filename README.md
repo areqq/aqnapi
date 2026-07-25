@@ -152,7 +152,7 @@ aqnapi config init            # interaktywne ustawienie loginów/klucza API
 # per-serwis (aliasy: n24, np, os)
 aqnapi napisy24    {hash,login,download,search,getid,imdb,attach,upload,delete,
                     mediainfo,notify,trans,premieres,edit}
-aqnapi napiprojekt {download,search,associate,account,upload,fileinfo}
+aqnapi napiprojekt {download,search,associate,account,upload,fileinfo,cover,version,report}
 aqnapi opensubtitles {login,logout,search,download,formats,languages,guessit}
 ```
 

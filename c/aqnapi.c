@@ -24,7 +24,7 @@
 #include <sys/ioctl.h>
 #include "third_party/zlib/zlib.h"
 
-#define VERSION "1.0.12"
+#define VERSION "1.0.13"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
@@ -1252,7 +1252,9 @@ static int cmd_config(const char*sub,const char*ov){
 /* ---------------------------------------------------------------- wyszukiwanie */
 static char* xml_first(const char*hay,const char*tag){ char op[48],cl[48]; snprintf(op,sizeof op,"<%s>",tag); snprintf(cl,sizeof cl,"</%s>",tag);
     const char*s=strstr(hay,op); if(!s){ char*e=xmalloc(1); e[0]=0; return e; } s+=strlen(op); const char*e=strstr(s,cl); if(!e){ char*x=xmalloc(1); x[0]=0; return x; }
-    size_t n=e-s; char*o=xmalloc(n+1); memcpy(o,s,n); o[n]=0; html_unescape(o); strip_inplace(o); return o; }
+    /* zdejmij CDATA (jak ElementTree) */ int cdata=0; const char*cd=strstr(s,"<![CDATA[");
+    if(cd && cd<e){ const char*ce=strstr(cd+9,"]]>"); if(ce && ce<e){ s=cd+9; e=ce; cdata=1; } }
+    size_t n=(size_t)(e-s); char*o=xmalloc(n+1); memcpy(o,s,n); o[n]=0; if(!cdata) html_unescape(o); strip_inplace(o); return o; }
 /* Iteruj elementy XML w kolejności dokumentu. Zwraca 1 i ustawia tag + inner
  * (malloc), przesuwa *pp za </tag>. Pomija <?..?>, <!..>, </..>. */
 static int xml_next(const char**pp,char*tag,size_t tagsz,char**inner){
@@ -1404,6 +1406,77 @@ static int cmd_np_associate(const char*cfgpath,const char*movie,const char*movie
     int ok=!strcmp(st,"success")||!strcmp(st,"ok");
     printf("[%s] %s\n", ok?"OK":"BŁĄD", st[0]?st:"brak statusu");
     free(st); free(body); return ok?0:1;
+}
+/* generyczny POST modów do api-napiprojekt3.php (client=pynapi). Zwraca XML (malloc) lub NULL. */
+static char* np_http_post(const char*const fields[][2], int nf){
+    const char*host="www.napiprojekt.pl",*boundary="----aqnapicafe0003"; SB b; sb_init(&b);
+    sb_puts(&b,"--");sb_puts(&b,boundary);sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"client\"\r\n\r\npynapi\r\n");
+    sb_puts(&b,"--");sb_puts(&b,boundary);sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"client_ver\"\r\n\r\n" VERSION "\r\n");
+    for(int i=0;i<nf;i++){ sb_puts(&b,"--");sb_puts(&b,boundary);sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"");sb_puts(&b,fields[i][0]);sb_puts(&b,"\"\r\n\r\n");sb_puts(&b,fields[i][1]);sb_puts(&b,"\r\n"); }
+    sb_puts(&b,"--");sb_puts(&b,boundary);sb_puts(&b,"--\r\n");
+    SB req; sb_init(&req); char hdr[512];
+    snprintf(hdr,sizeof hdr,"POST /api/api-napiprojekt3.php HTTP/1.0\r\nHost: %s\r\nUser-Agent: aqnapi-c/%s\r\nAccept: */*\r\nContent-Type: multipart/form-data; boundary=%s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",host,VERSION,boundary,b.len);
+    sb_puts(&req,hdr); sb_putn(&req,b.b,b.len); free(b.b);
+    size_t bl; char*body=http_request(host,req.b,req.len,&bl); free(req.b); return body;
+}
+/* cover: mode=2 — okładka + ocena filmu skojarzonego z hashem */
+static int cmd_np_cover(const char*movie,const char*out){
+    if(!movie){ fprintf(stderr,"napiprojekt cover wymaga pliku\n"); return 2; }
+    char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); return 1; }
+    const char*f[][2]={{"mode","2"},{"downloaded_cover_id",md}};
+    char*xml=np_http_post(f,2); if(!xml) die("napiprojekt: błąd połączenia");
+    char*mv=strstr(xml,"<movie>");
+    char*st=mv?xml_first(mv,"status"):strdup(""); int ok=mv && !strcasecmp(st,"success"); free(st);
+    if(!ok){ free(xml); fprintf(stderr,"Plik nie jest skojarzony z żadnym filmem (brak okładki).\n"); return 2; }
+    char*title=xml_first(mv,"title"),*year=xml_first(mv,"year"),*id=xml_first(mv,"id"),
+         *rating=xml_first(mv,"rating"),*votes=xml_first(mv,"votes"),
+         *imdb=xml_first(mv,"imdb_com"),*nick=xml_first(mv,"nick"),*cb=xml_first(mv,"cover");
+    printf("Film: %s (%s)\n",title,year);
+    printf("  MovieId: %s\n",id);
+    if(rating[0]) printf("  Ocena: %s (%s głosów)\n",rating,votes);
+    if(imdb[0]) printf("  IMDB: %s\n",imdb);
+    if(nick[0]) printf("  Skojarzył: %s\n",nick);
+    size_t clen=0; unsigned char*cover=cb[0]?b64decode(cb,strlen(cb),&clen):NULL;
+    if(out && cover && clen){ write_file(out,(char*)cover,clen); printf("  Okładka zapisana (%zu B): %s\n",clen,out); }
+    else if(cover && clen){ printf("  Okładka: %zu B (użyj -o by zapisać)\n",clen); }
+    free(cover); free(title);free(year);free(id);free(rating);free(votes);free(imdb);free(nick);free(cb); free(xml); return 0;
+}
+/* version: mode=16 — najnowsza wersja klienta */
+static int cmd_np_version(void){
+    const char*f[][2]={{"mode","16"}};
+    char*xml=np_http_post(f,1); if(!xml) die("napiprojekt: błąd połączenia");
+    char*ver=xml_first(xml,"version_number"),*url=xml_first(xml,"download_url"),*ch=xml_first(xml,"latest_changes");
+    printf("Najnowsza wersja: %s\n",ver); printf("Pobierz: %s\n",url);
+    if(ch[0]) printf("Zmiany:\n%s\n",ch);
+    free(ver);free(url);free(ch);free(xml); return 0;
+}
+static const char*NP_KINDS[]={
+    "Napisy nie są w ogóle wyświetlane",
+    "Napisy są do tego filmu, ale wyświetlają się w nieodpowiednim momencie",
+    "Napisy są do zupełnie innego filmu",
+    "Napisy są przetłumaczone przez komputer - translator",
+    "Napisy mają złe kodowanie, krzaki zamiast polskich liter",
+    "Jest tylko część napisów",
+    "Program pobrał napisy w innym języku, niż to było ustawione",
+    "Gdy włączam film napisy pojawiają mi się podwójnie",
+    "Inny powód"};
+/* report: mode=64 — zgłoś złe napisy (user_nick/user_password) */
+static int cmd_np_report(const char*cfgpath,const char*movie,int kind,const char*comment,const char*lang,int list){
+    if(list){ for(int i=0;i<9;i++) printf("  %d: %s\n",i,NP_KINDS[i]); return 0; }
+    if(kind<0||kind>=9){ fprintf(stderr,"Zły --kind (0-8)\n"); return 4; }
+    if(!movie){ fprintf(stderr,"napiprojekt report wymaga pliku\n"); return 2; }
+    char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); return 1; }
+    char user[128],pass[128]; np_creds(cfgpath,user,sizeof user,pass,sizeof pass);
+    if(!user[0]||!pass[0]){ fprintf(stderr,"Błąd uwierzytelnienia: Zgłoszenie wymaga loginu i hasła.\n"); return 2; }
+    char fn[512]; input_basename(movie,fn,sizeof fn);
+    char L[8]; snprintf(L,sizeof L,"%s",lang&&lang[0]?lang:"PL"); for(char*p=L;*p;p++)*p=toupper((unsigned char)*p);
+    char ks[8]; snprintf(ks,sizeof ks,"%d",kind); char*enc=np_encode_password(pass);
+    const char*f[][2]={{"mode","64"},{"user_nick",user},{"user_password",enc},{"RBS_FileHash",md},{"RBS_VideoFile",fn},
+        {"RBS_Lang",L},{"RBS_ProblemKind",ks},{"RBS_ProblemPercent",""},{"RBS_ProblemPlayer",""},{"RBS_ProblemComment",comment?comment:""}};
+    char*xml=np_http_post(f,10); free(enc); if(!xml) die("napiprojekt: błąd połączenia");
+    char*err=xml_first(xml,"error"); if(err[0]){ fprintf(stderr,"Błąd: %s\n",err); free(err); free(xml); return 1; } free(err);
+    char*st=xml_first(xml,"status"); printf("Zgłoszono (%s): status=%s\n",NP_KINDS[kind], st[0]?st:"ok");
+    free(st); free(xml); return 0;
 }
 
 /* ---------------------------------------------------------------- HTTPS (TLS) + update
@@ -2271,7 +2344,7 @@ int main(int argc,char**argv){
         *release=NULL,*resolution=NULL,*duration=NULL,*a_size=NULL,*year=NULL,
         *title_pl=NULL,*episode_title=NULL,*a_sync=NULL,*proof=NULL,*reason=NULL,*service=NULL,
         *rec_id=NULL,*sms_code=NULL,*info=NULL,*progress=NULL,*set_val=NULL;
-    int notify_off=0, show_fields=0;
+    int notify_off=0, show_fields=0, rep_kind=0, rep_list=0;
     const char*set_list[32]; int nset=0;
     double fps=0,from_fps=0,to_fps=0,maxd=0,mind=0;
     int keep_tags=0,strip_sdh=0,no_san=0,rebase=1,corrected=0,testing=0,check=0,do_login=0,check_only=0;
@@ -2311,6 +2384,8 @@ int main(int argc,char**argv){
         else if(!strcmp(a,"--set")){ if(++i<argc){ set_val=argv[i]; if(nset<32) set_list[nset++]=argv[i]; } }
         else if(!strcmp(a,"--off")) notify_off=1;
         else if(!strcmp(a,"--show")) show_fields=1;
+        else if(!strcmp(a,"--kind")){ if(++i<argc) rep_kind=atoi(argv[i]); }
+        else if(!strcmp(a,"--list")) rep_list=1;
         else if(!strcmp(a,"--comment")){ if(++i<argc) comment=argv[i]; }
         else if(!strcmp(a,"--corrected")) corrected=1;
         else if(!strcmp(a,"--test")||!strcmp(a,"--dry-run")) testing=1;
@@ -2358,6 +2433,9 @@ int main(int argc,char**argv){
         if(!strcmp(sub,"upload")){ return cmd_np_upload(cfgpath,movie,srt,lang,translator,corrected,comment,testing,do_login); }
         if(!strcmp(sub,"account")){ return cmd_np_account(cfgpath); }
         if(!strcmp(sub,"associate")){ const char*mv=a1?a1:movie; return cmd_np_associate(cfgpath,mv,nfiles>2?files[2]:NULL); }
+        if(!strcmp(sub,"cover")){ const char*mv=a1?a1:movie; return cmd_np_cover(mv,out); }
+        if(!strcmp(sub,"version")){ return cmd_np_version(); }
+        if(!strcmp(sub,"report")){ const char*mv=a1?a1:movie; return cmd_np_report(cfgpath,mv,rep_kind,comment,lang,rep_list); }
         fprintf(stderr,"napiprojekt: '%s' nieobsługiwane w wersji C (użyj aqnapi.py)\n",sub); return 2; }
     if(!strcmp(cmd,"napisy24")||!strcmp(cmd,"n24")){ const char*sub=nfiles>0?files[0]:NULL,*a1=nfiles>1?files[1]:NULL; if(!sub){usage();return 2;}
         if(!strcmp(sub,"hash")){ if(!a1){usage();return 2;} return cmd_hash(a1); }

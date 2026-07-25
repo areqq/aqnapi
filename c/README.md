@@ -34,6 +34,7 @@ guessit), search, sync (interaktywny TUI), config, update, URL Range.
 | `get` (agregator np→n24, HTTP) | pobiera i zapisuje SRT |
 | `napiprojekt download` / `fileinfo` (HTTP) | bajtowo |
 | `napiprojekt account` / `associate` (HTTP GET, hasło jawne) | account: dane konta (parser XML w kolejności dokumentu); associate: powiązanie hasza z `id_filmu`. Werdykt/wyjście bajtowo == Python (live: areq) |
+| `napiprojekt cover` (mode=2) / `version` (mode=16) / `report` (mode=64) | okładka+ocena filmu (base64 JPEG, CDATA zdejmowane jak ElementTree) / najnowsza wersja klienta / zgłoszenie złych napisów (`--kind`/`--list`, user_nick/user_password). Bajtowo == Python (live: cover E02, version, report --list/bad-kind) |
 | `napisy24 download` (CheckSubAgent+ZIP) / `getid` (download.php+ZIP) | **plik+stdout bajtowo** (ZIP-inflate przez zlib) |
 | `napiprojekt upload` (mode=512/1024, **7z-AES**, `--login`) | własny AES-256+SHA-256+kontener 7z; **archiwum rozpakowywalne przez `7z x`**; `--login` → pola `user_nick`/`user_password` (upload przypisany do konta); odpowiedź serwera == Python |
 | **URL http(s) jako wejście** (`--movie`/`--srt`/`input`/…) | pobieranie **zakresowe** (HTTP Range): md5-10MiB → 10 MiB, OSH → rozmiar+2×64 KiB, FPS → prefiks 8 MiB (`fmemopen`), napisy → całość; Basic auth z `user:pass@`. **http w obu buildach; https tylko w wariancie TLS.** Hash 1.7 GB filmu bajtowo == Python (live, https) |
