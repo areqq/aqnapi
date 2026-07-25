@@ -22,6 +22,15 @@ Obowiązkowy tryb pracy przy KAŻDEJ zmianie zachowania:
    `diff <(python3 aqnapi.py convert in -o /tmp/p) <(./dist/aqnapi-c.com convert in -o /tmp/c); cmp /tmp/p /tmp/c`.
 5. Zaktualizuj dokumentację obu (`README.md`, `docs/`, `c/README.md`) i tabelę
    pokrycia w `c/README.md`.
+6. **Podbij wersję w TRZECH miejscach naraz** (muszą być identyczne — CI/release
+   to sprawdza i przerywa przy rozjeździe):
+   - `aqnapi.py` → `__version__ = "X.Y.Z"`
+   - `c/aqnapi.c` → `#define VERSION "X.Y.Z"`
+   - `openwrt/aqnapi/Makefile` → `PKG_VERSION:=X.Y.Z`
+   Następnie commit + `git tag vX.Y.Z` + push tagu → workflow `Release` buduje
+   APE, binarkę C (aqnapi-c.com) i **pakiety OpenWrt** (.ipk/.apk per architektura)
+   i publikuje wydanie. Job `openwrt` i tak nadpisuje `PKG_VERSION` z tagu, ale
+   trzymaj zsynchronizowaną wartość w repo, żeby build lokalny formuły był zgodny.
 
 Jeśli funkcji **nie da się** jeszcze zrobić w C (np. wymaga TLS, którego brakuje
 w danym torze budowania), **wyraźnie odnotuj to** w `c/README.md` w sekcji „co

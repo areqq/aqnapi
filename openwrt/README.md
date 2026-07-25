@@ -4,16 +4,20 @@ Formuła (`Makefile`) budująca **natywny** pakiet aqnapi na OpenWrt. Ta sama
 definicja pakietu produkuje **`.ipk`** albo **`.apk`** — zależnie od wersji
 OpenWrt / systemu pakietów (patrz [ipk vs apk](#ipk-vs-apk)).
 
-Pakiet kompiluje jednoplikowe źródło C (`c/aqnapi.c`) toolchainem docelowym i
-instaluje binarkę do `/usr/bin/aqnapi`. Bez interpretera, bez zależności
-runtime poza `zlib` (i `libmbedtls` przy włączonym TLS).
+Pakiet kompiluje jednoplikowe źródło C (`c/aqnapi.c`) **z lokalnego checkoutu
+repo** (bez pobierania z sieci ani sum kontrolnych) i instaluje binarkę do
+`/usr/bin/aqnapi`. Bez interpretera, bez zależności runtime poza `zlib`
+(i `libmbedtls` przy włączonym TLS).
 
 ```
 openwrt/
-  aqnapi/
-    Makefile      # formuła pakietu OpenWrt
-  README.md       # ten plik
+  aqnapi/Makefile   # formuła pakietu OpenWrt (buduje c/aqnapi.c z tego repo)
+  README.md         # ten plik
 ```
+
+> Formuła buduje **z sąsiedniego `c/aqnapi.c`** (ścieżka `../../c` względem
+> `Makefile`). Dlatego pakiet dodaje się do OpenWrt jako **feed `src-link`**
+> wskazujący na `openwrt/`, a nie przez skopiowanie samego `Makefile`.
 
 ## ipk vs apk
 
@@ -24,7 +28,7 @@ openwrt/
 | ≤ 23.05 oraz 24.10 (domyślnie) | **`.ipk`** | `opkg` |
 | snapshot / z `CONFIG_USE_APK=y` | **`.apk`** | `apk` |
 
-Ten sam `make package/aqnapi/compile` wygeneruje pakiet w formacie, którego używa
+To samo `make package/aqnapi/compile` wygeneruje pakiet w formacie, którego używa
 Twoje SDK. Chcesz konkretny format — wybierz odpowiedni **SDK** (patrz niżej) lub
 przełącz `Global build settings → Use apk package manager` w `menuconfig`.
 
@@ -41,20 +45,18 @@ Nie trzeba budować całego systemu — SDK dla Twojego targetu wystarczy.
    cd openwrt-sdk-*/
    ```
 
-2. **Dodaj pakiet.** Skopiuj katalog formuły do drzewa SDK:
+2. **Dodaj repo jako feed** `src-link` (wskazujący katalog `openwrt/` tego repo):
 
    ```sh
-   mkdir -p package/aqnapi
-   cp /ścieżka/do/aqnapi/openwrt/aqnapi/Makefile package/aqnapi/
+   echo "src-link aqnapi /ścieżka/do/aqnapi/openwrt" >> feeds.conf.default
+   ./scripts/feeds update aqnapi
+   ./scripts/feeds install aqnapi
    ```
 
-   (Alternatywnie własny feed: dopisz `src-link aqnapi /ścieżka/do/aqnapi/openwrt`
-   do `feeds.conf`, potem `./scripts/feeds update aqnapi && ./scripts/feeds install aqnapi`.)
-
-3. **Zależności feeds** (mbedtls/zlib są w `base`/`packages`):
+3. **Zależności** (mbedtls/zlib/ca-bundle są w feedzie `base`/`packages`):
 
    ```sh
-   ./scripts/feeds update -a
+   ./scripts/feeds update base packages
    ./scripts/feeds install libmbedtls zlib ca-bundle
    ```
 
@@ -70,30 +72,21 @@ Nie trzeba budować całego systemu — SDK dla Twojego targetu wystarczy.
 5. **Wynik** (ipk lub apk):
 
    ```sh
-   find bin/ -name 'aqnapi_*'
-   #  bin/packages/<arch>/base/aqnapi_1.0.14-1_<arch>.ipk        (ipk)
-   #  bin/packages/<arch>/base/aqnapi-1.0.14-r1.apk              (apk)
+   find bin/ -name 'aqnapi[-_]*'
+   #  bin/packages/<arch>/aqnapi/aqnapi_1.0.15-1_<arch>.ipk        (ipk)
+   #  bin/packages/<arch>/aqnapi/aqnapi-1.0.15-r1.apk              (apk)
    ```
-
-## Budowanie w pełnym buildroot
-
-Identycznie, tylko w drzewie źródeł OpenWrt: umieść formułę w
-`package/aqnapi/Makefile` (lub przez własny feed), a następnie
-`make menuconfig` → zaznacz `Multimedia → aqnapi`, `make`. Pakiet trafi do
-`bin/packages/<arch>/…`.
 
 ## Instalacja na routerze
 
-Skopiuj pakiet na router i zainstaluj:
-
 ```sh
 # ipk (opkg)
-scp aqnapi_1.0.14-1_<arch>.ipk root@router:/tmp/
-ssh root@router 'opkg install /tmp/aqnapi_1.0.14-1_<arch>.ipk'
+scp aqnapi_1.0.15-1_<arch>.ipk root@router:/tmp/
+ssh root@router 'opkg install /tmp/aqnapi_1.0.15-1_<arch>.ipk'
 
 # apk
-scp aqnapi-1.0.14-r1.apk root@router:/tmp/
-ssh root@router 'apk add --allow-untrusted /tmp/aqnapi-1.0.14-r1.apk'
+scp aqnapi-1.0.15-r1.apk root@router:/tmp/
+ssh root@router 'apk add --allow-untrusted /tmp/aqnapi-1.0.15-r1.apk'
 ```
 
 Zależności (`zlib`, a przy TLS `libmbedtls`, `ca-bundle`) `opkg`/`apk` dociągnie
@@ -102,6 +95,15 @@ same, jeśli masz skonfigurowane repozytoria; w razie potrzeby doinstaluj ręczn
 ```sh
 opkg update && opkg install zlib libmbedtls ca-bundle
 ```
+
+## Gotowe pakiety z wydań
+
+Każde wydanie (`vX.Y.Z`) buduje pakiety automatycznie (GitHub Actions,
+`openwrt/gh-action-sdk`) i dołącza je do
+[Releases](https://github.com/areqq/aqnapi/releases) dla kilku architektur:
+`x86_64`, `aarch64_cortex-a53`, `mipsel_24kc` (ramips/mt7621), `mips_24kc`
+(ath79) jako `.ipk` (23.05) oraz `x86_64` jako `.apk` (snapshot). Możesz je
+pobrać zamiast budować samodzielnie.
 
 ## TLS / zależności
 
@@ -133,16 +135,12 @@ Poświadczenia (napisy24 / napiprojekt / OpenSubtitles) trzymaj w
 
 ## Uwagi
 
-- **Wersja.** `PKG_VERSION` w `Makefile` wskazuje tag `vX.Y.Z` repozytorium
-  (klonowany przez `git`). Aktualizując, zmień `PKG_VERSION` (i `PKG_RELEASE`
-  przy poprawkach samej formuły).
-- **Hash / odtwarzalność.** Domyślnie `PKG_MIRROR_HASH:=skip` (build pobiera
-  źródło z GitHuba bez weryfikacji sumy). Dla powtarzalnych buildów: uruchom
-  `make package/aqnapi/download V=s`, policz `sha256sum dl/aqnapi-*.tar.*` i wpisz
-  wynik w miejsce `skip`.
-- **Build lokalny (bez GitHuba).** Jeśli chcesz kompilować z lokalnej kopii
-  repo, użyj feeda `src-link` (krok 2, alternatywa) albo w `Makefile` zamień
-  `PKG_SOURCE_PROTO:=git`/`PKG_SOURCE_URL` na lokalne źródło.
+- **Bez pobierania.** Formuła kompiluje `c/aqnapi.c` z tego samego checkoutu
+  (`AQNAPI_SRC := $(realpath …/../../c)`) — brak `PKG_SOURCE`, sum kontrolnych
+  ani zależności od sieci. Dlatego wymagany jest feed `src-link` (a w CI cały
+  repo jest montowany jako feed).
+- **Wersja.** `PKG_VERSION` w `Makefile` to etykieta pakietu; trzymaj ją zsynchro-
+  nizowaną z `__version__`/`#define VERSION` (workflow ustawia ją z tagu).
 - **Architektura.** Powstaje zwykły ELF pod jeden target (mips/arm/…), inaczej
   niż uniwersalne APE z cosmo — dlatego budujesz per-SDK. Wyjście jest bajtowo
   zgodne z wersją cosmo i referencyjną wersją Python.
