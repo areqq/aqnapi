@@ -110,6 +110,9 @@ AQNAPI_TLS=1 OUT=aqnapi-owrt c/build-native.sh
 # na routerze:  opkg install zlib libmbedtls
 ```
 
+Gotowy **pakiet OpenWrt** (`.ipk`/`.apk`) — formuła i instrukcja w
+[`openwrt/`](../openwrt/README.md).
+
 Zależności: **zlib** (rozpakowanie ZIP napisy24); **mbedtls** tylko przy
 `AQNAPI_TLS=1`. Weryfikacja CA szuka po kolei: bundle APE (`/zip/cacert.pem`,
 tylko cosmo), `$SSL_CERT_FILE`, typowe ścieżki (Debian/OpenWrt
