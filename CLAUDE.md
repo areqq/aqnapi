@@ -187,9 +187,8 @@ delete`, `update`, URL `https://`. C ma własne MD5/OSH/SHA-256/AES-256/7z/base6
 HTTP(S)/silnik napisów. `sync` (interaktywny TUI termios+ANSI oraz
 `--offset`/`--anchor`) i `config` (init/show/path, chmod 600) SĄ w porcie —
 bajtowo zgodne. **Przy KAŻDEJ zmianie w `aqnapi.py` pilnuj parności C**
-(`diff` wyjść, testy live). Nie przeniesione (użyj `aqnapi.py`): agregujący
-`upload`, napisy24 `login`(klient)/`imdb`, opensubtitles
-`logout`/`formats`/`languages`/`guessit`.
+(`diff` wyjść, testy live). Nie przeniesione (użyj `aqnapi.py`): tylko
+agregujący `upload` (multi-serwis).
 
 Krytyczne dla zgodności z APE: nie wprowadzaj zależności od **`lzma`** ani
 **`ctypes`** — te moduły nie są wkompilowane w APE Pythona (reszta stdlib, w tym
