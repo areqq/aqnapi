@@ -725,5 +725,50 @@ class TestUrlInput(unittest.TestCase):
             aqnapi.url_size(bad)
 
 
+class TestNapisy24Attach(unittest.TestCase):
+    """AddSubPrg.php: hash napisów i budowa multipart (offline)."""
+
+    def test_subtitle_hash(self):
+        # rozmiar + suma pełnych słów 8B LE, 16 hex UPPER; ogon <8B pomijany
+        self.assertEqual(aqnapi.subtitle_hash(b""), "%016X" % 0)
+        data = b"01234567" + b"89"  # 10 B: 1 pełne słowo + 2 ogon
+        word = struct.unpack("<Q", b"01234567")[0]
+        self.assertEqual(aqnapi.subtitle_hash(data), "%016X" % ((10 + word) & 0xFFFFFFFFFFFFFFFF))
+        # wynik to 16 wielkich hex
+        h = aqnapi.subtitle_hash(os.urandom(1000))
+        self.assertRegex(h, r"^[0-9A-F]{16}$")
+
+    def test_prg_multipart_body(self):
+        c = aqnapi.Napisy24Client()
+        captured = {}
+
+        def fake_raw(host, path, ctype, body, **kw):
+            captured["path"] = path
+            captured["ctype"] = ctype
+            captured["body"] = body
+            return b"OK-0"
+
+        orig = aqnapi.raw_http10_post
+        aqnapi.raw_http10_post = fake_raw
+        try:
+            hashes = {"osh": "abcdef0123456789", "md5_10mb": "0" * 32,
+                      "size": 123456, "name": "film.mkv"}
+            verdict = c.prg_check("login", "haslo", hashes, "AABBCCDDEEFF0011", imdb="tt8080122")
+        finally:
+            aqnapi.raw_http10_post = orig
+        self.assertEqual(verdict, "OK-0")
+        self.assertEqual(captured["path"], "/run/AddSubPrg.php")
+        self.assertIn("multipart/form-data; boundary=", captured["ctype"])
+        body = captured["body"]
+        # pola zaciemnione (obf) i jawne we właściwej kolejności
+        self.assertIn(b'name="postAction"', body)
+        self.assertIn(b"Check", body)
+        self.assertIn(b'name="hm"', body)
+        self.assertIn(aqnapi.n24_obf("ABCDEF0123456789").encode(), body)  # hm = OSH UPPER
+        self.assertIn(aqnapi.n24_obf("login").encode(), body)
+        self.assertIn(aqnapi.n24_obf(aqnapi._norm_imdb("tt8080122")).encode(), body)
+        self.assertIn(b"Content-Transfer-Encoding: 8bit", body)
+
+
 if __name__ == "__main__":
     unittest.main()

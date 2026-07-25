@@ -26,7 +26,7 @@
 #include <sys/ioctl.h>
 #include "third_party/zlib/zlib.h"
 
-#define VERSION "1.0.5"
+#define VERSION "1.0.6"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
@@ -141,6 +141,12 @@ static int md5_10mb(const char*path,char out[33]){
     unsigned char d[16]; md5_final(&m,d); hexlower(d,16,out); return 0;
 }
 static void md5_bytes(const unsigned char*p,size_t n,char out[33]){ MD5 m; md5_init(&m); md5_update(&m,p,n); unsigned char d[16]; md5_final(&m,d); hexlower(d,16,out); }
+/* Hash napisów Napisy24 (pole hs): rozmiar + suma WSZYSTKICH pełnych słów 8B LE; 16 hex WIELKIE. */
+static void subtitle_hash(const unsigned char*data,size_t n,char out[17]){
+    uint64_t h=(uint64_t)n; size_t m=(n/8)*8;
+    for(size_t i=0;i<m;i+=8){ uint64_t w; memcpy(&w,data+i,8); h+=w; }
+    snprintf(out,17,"%016llX",(unsigned long long)h);
+}
 
 /* ---------------------------------------------------------------- SHA-256 */
 typedef struct { uint32_t s[8]; uint64_t len; unsigned char buf[64]; size_t n; } SHA256;
@@ -1647,6 +1653,79 @@ static unsigned char* url_read_full(const char*url,size_t*outlen){
     if(outlen)*outlen=n; return (unsigned char*)b;
 }
 
+/* ---------------------------------------------------------- napisy24 attach
+ * AddSubPrg.php — działająca ścieżka API klienta ("Dodaj napisy (tylko do
+ * programu)"). Dwufazowo (Check → Send) przez plain HTTP; powiązanie po haszu
+ * filmu, bez publicznego wpisu. Pola login/pass/hm/md/hs/fs/tm/dm/fp/im są
+ * zaciemniane (n24_obf), fn jawne (utf-8), sf to surowy plik. postVer=v1.99.1. */
+#define N24_POSTVER "v1.99.1"
+static void prg_field(SB*b,const char*bnd,const char*name,const char*value,const char*charset){
+    sb_puts(b,"--"); sb_puts(b,bnd); sb_puts(b,"\r\nContent-Disposition: form-data; name=\""); sb_puts(b,name); sb_puts(b,"\"\r\n");
+    if(charset){ sb_puts(b,"Content-Type: text/plain; charset="); sb_puts(b,charset); sb_puts(b,"\r\n"); }
+    sb_puts(b,"Content-Transfer-Encoding: 8bit\r\n\r\n"); sb_puts(b,value); sb_puts(b,"\r\n"); }
+#define PRG_OBF(b,bnd,name,val) do{ char*_o=n24_obf(val); prg_field(b,bnd,name,_o,NULL); free(_o); }while(0)
+static char* n24_prg_post(const char*body,size_t blen,const char*boundary){
+    SB req; sb_init(&req); char hdr[400];
+    snprintf(hdr,sizeof hdr,"POST /run/AddSubPrg.php HTTP/1.0\r\nHost: napisy24.pl\r\nUser-Agent: Mozilla/4.0\r\nAccept: */*\r\nContent-Type: multipart/form-data; boundary=%s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",boundary,blen);
+    sb_puts(&req,hdr); sb_putn(&req,body,blen);
+    size_t bl; char*resp=http_request("napisy24.pl",req.b,req.len,&bl); free(req.b); return resp; }
+static const char* skip_ws(const char*s){ while(*s==' '||*s=='\r'||*s=='\n'||*s=='\t')s++; return s; }
+static int cmd_n24_attach(const char*cfgpath,const char*movie,const char*srt,const char*imdb,
+                          const char*duration,const char*resolution,const char*fpsflag,int check_only){
+    if(!movie||!srt){ fprintf(stderr,"napisy24 attach wymaga --movie i --srt\n"); return 2; }
+    Ini ini; ini_load(config_path(cfgpath),&ini);
+    char login[128],pass[128];
+    snprintf(login,sizeof login,"%s",ini_get(&ini,0,"login")); snprintf(pass,sizeof pass,"%s",ini_get(&ini,0,"pass"));
+    const char*eu=getenv("N24_USER"),*ep=getenv("N24_PASS"); if(eu&&*eu)snprintf(login,sizeof login,"%s",eu); if(ep&&*ep)snprintf(pass,sizeof pass,"%s",ep);
+    if(!login[0]||!pass[0]){ fprintf(stderr,"Błąd uwierzytelnienia: napisy24 attach wymaga loginu i hasła\n"); return 2; }
+    char osh[17]; int r=oshash(movie,osh);
+    if(r==-1){ fprintf(stderr,"Błąd: plik za mały na hash OSH: %s\n",movie); return 1; }
+    if(r==-2){ fprintf(stderr,"Brak pliku: %s\n",movie); return 1; }
+    for(char*p=osh;*p;p++)*p=toupper((unsigned char)*p);
+    char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); return 1; }
+    char fs[32]; snprintf(fs,sizeof fs,"%ld",input_size(movie));
+    char mvname[512]; input_basename(movie,mvname,sizeof mvname);
+    size_t sn=0; char*srtdata=read_input(srt,&sn); if(!srtdata){ fprintf(stderr,"Brak pliku: %s\n",srt); return 1; }
+    char hs[17]; subtitle_hash((unsigned char*)srtdata,sn,hs);
+    char srtname[512]; input_basename(srt,srtname,sizeof srtname);
+    char imn[16]=""; int have_im=0; if(imdb&&imdb[0]){ norm_imdb(imdb,imn,sizeof imn); if(strcmp(imn,"0")!=0) have_im=1; }
+    const char*bnd="----aqnapiprg000001";
+    /* Faza 1: Check (read-only) */
+    SB b; sb_init(&b);
+    prg_field(&b,bnd,"postAction","Check",NULL); prg_field(&b,bnd,"postVer",N24_POSTVER,NULL);
+    PRG_OBF(&b,bnd,"login",login); PRG_OBF(&b,bnd,"pass",pass);
+    PRG_OBF(&b,bnd,"hm",osh); PRG_OBF(&b,bnd,"md",md); PRG_OBF(&b,bnd,"hs",hs); PRG_OBF(&b,bnd,"fs",fs);
+    if(have_im) PRG_OBF(&b,bnd,"im",imn);
+    sb_puts(&b,"--"); sb_puts(&b,bnd); sb_puts(&b,"--\r\n");
+    char*resp=n24_prg_post(b.b,b.len,bnd); free(b.b);
+    if(!resp){ free(srtdata); fprintf(stderr,"napisy24: błąd połączenia\n"); return 1; }
+    const char*v=skip_ws(resp); char vsave[8]; snprintf(vsave,sizeof vsave,"%.4s",v);
+    int ok2=!strncmp(v,"OK-2",4), ok0=!strncmp(v,"OK-0",4), ok1=!strncmp(v,"OK-1",4);
+    if(ok2){ printf("[BŁĄD] napisy już w bazie (duplikat): %.40s\n",v); free(resp); free(srtdata); return 1; }
+    if(!ok0&&!ok1){ printf("[BŁĄD] serwer odrzucił fazę Check: %.60s\n",v); free(resp); free(srtdata); return 1; }
+    if(check_only){ printf("[OK] check-only (%s = %s): nic nie wysłano\n",vsave, ok0?"nowe":"film znany");
+        printf("(faza Check, read-only: OK-0 = nowe, OK-1 = film znany, OK-2 = duplikat)\n"); free(resp); free(srtdata); return 0; }
+    free(resp);
+    char fpsbuf[32]=""; if(fpsflag&&fpsflag[0]) snprintf(fpsbuf,sizeof fpsbuf,"%s",fpsflag);
+    else { double f=fps_from_file(movie); if(f>0) snprintf(fpsbuf,sizeof fpsbuf,"%.3f",f); }
+    /* Faza 2: Send */
+    SB s; sb_init(&s);
+    prg_field(&s,bnd,"postAction","Send",NULL); prg_field(&s,bnd,"postVer",N24_POSTVER,NULL);
+    PRG_OBF(&s,bnd,"login",login); PRG_OBF(&s,bnd,"pass",pass);
+    PRG_OBF(&s,bnd,"hm",osh); PRG_OBF(&s,bnd,"md",md); PRG_OBF(&s,bnd,"hs",hs); PRG_OBF(&s,bnd,"fs",fs);
+    PRG_OBF(&s,bnd,"tm",duration?duration:""); PRG_OBF(&s,bnd,"dm",resolution?resolution:""); PRG_OBF(&s,bnd,"fp",fpsbuf);
+    if(have_im) PRG_OBF(&s,bnd,"im",imn);
+    prg_field(&s,bnd,"fn",mvname,"utf-8");
+    if(ok0){ sb_puts(&s,"--"); sb_puts(&s,bnd); sb_puts(&s,"\r\nContent-Disposition: form-data; name=\"sf\"; filename=\"");
+        sb_puts(&s,srtname); sb_puts(&s,"\"\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"); sb_putn(&s,srtdata,sn); sb_puts(&s,"\r\n"); }
+    sb_puts(&s,"--"); sb_puts(&s,bnd); sb_puts(&s,"--\r\n");
+    char*resp2=n24_prg_post(s.b,s.len,bnd); free(s.b); free(srtdata);
+    if(!resp2){ fprintf(stderr,"napisy24: błąd połączenia\n"); return 1; }
+    const char*v2=skip_ws(resp2); int ok=!strncmp(v2,"OK",2);
+    printf("[%s] %s | %.80s\n", ok?"OK":"BŁĄD", vsave, v2);
+    free(resp2); return ok?0:1;
+}
+
 static int cmd_update(int check){
 #ifdef AQNAPI_TLS
     int st; size_t n;
@@ -1693,8 +1772,11 @@ static void usage(void){
         "  aqnapi download FILM [-l PL] [-o WYJ] [--fps F]      (napiprojekt, HTTP)\n"
         "  aqnapi napiprojekt upload --movie FILM --srt PLIK [-l PL] [--translator A]\n"
         "                            [--corrected] [--comment K] [--login] [--dry-run]\n"
+        "  aqnapi napisy24 attach --movie FILM --srt PLIK [--imdb tt..] [--check-only]\n"
+        "                         [--duration HH:MM:SS] [--resolution WxH] [--fps F]\n"
         "  aqnapi --version | --help\n"
         "napiprojekt upload buduje 7z-AES natywnie w C; --login przypisuje do konta.\n"
+        "napisy24 attach (AddSubPrg.php) powiązuje napisy po haszu filmu (bez wpisu publicznego).\n"
         "TLS (OpenSubtitles, napisy24 WWW) i interaktywny sync — w wariancie aqnapi-c-tls.com / Python.\n", VERSION);
 }
 
@@ -1703,7 +1785,7 @@ int main(int argc,char**argv){
         *release=NULL,*resolution=NULL,*duration=NULL,*a_size=NULL,*year=NULL,
         *title_pl=NULL,*episode_title=NULL,*a_sync=NULL,*proof=NULL,*reason=NULL;
     double fps=0,from_fps=0,to_fps=0,maxd=0,mind=0;
-    int keep_tags=0,strip_sdh=0,no_san=0,rebase=1,corrected=0,testing=0,check=0,do_login=0;
+    int keep_tags=0,strip_sdh=0,no_san=0,rebase=1,corrected=0,testing=0,check=0,do_login=0,check_only=0;
     const char*srt=NULL,*translator=NULL,*comment=NULL;
     char*files[64]; int nfiles=0; double offs[32]; int noff=0; char*ats[64]; int nat=0; char*anch[64]; int nanch=0;
     /* parsowanie niezależne od pozycji (flagi globalne mogą być przed poleceniem) */
@@ -1736,6 +1818,7 @@ int main(int argc,char**argv){
         else if(!strcmp(a,"--corrected")) corrected=1;
         else if(!strcmp(a,"--test")||!strcmp(a,"--dry-run")) testing=1;
         else if(!strcmp(a,"--check")) check=1;
+        else if(!strcmp(a,"--check-only")) check_only=1;
         else if(!strcmp(a,"--login")) do_login=1;
         else if(!strcmp(a,"--fps")){ if(++i<argc) fps=atof(argv[i]); }
         else if(!strcmp(a,"--from")){ if(++i<argc) from_fps=atof(argv[i]); }
@@ -1786,6 +1869,8 @@ int main(int argc,char**argv){
         if(!strcmp(sub,"getid")){ if(!a1){usage();return 2;} return cmd_n24_getid(a1,out,movie,fps,opt); }
         if(!strcmp(sub,"download")){ if(!a1){usage();return 2;} return cmd_n24_download(a1,lang,out,fps,opt); }
         if(!strcmp(sub,"search")){ return n24_search(imdb,title); }
+        if(!strcmp(sub,"attach")){ char fpsb[16]=""; if(fps>0) snprintf(fpsb,sizeof fpsb,"%g",fps);
+            return cmd_n24_attach(cfgpath,movie,srt,imdb,duration,resolution,fpsb[0]?fpsb:NULL,check_only); }
         if(!strcmp(sub,"upload")){
 #ifdef AQNAPI_TLS
             char fpsb[16]=""; if(fps>0) snprintf(fpsb,sizeof fpsb,"%g",fps);

@@ -108,7 +108,20 @@ szczegółów protokołów.
   zaciemniane: `XOR (0x7F+(i+1)^2)`, reverse bajtów, UPPER hex. `fh` UPPER.
   Alternatywa bez obf: `CheckSubAgent.php` (konto agenta `dmnapi:4lumen28`) —
   używane przez `download`/`get`, bo nie wymaga logowania.
-- **Napisy24 upload** idzie przez formularz WWW `/dodaj-napisy` (Joomla+CB+
+- **Napisy24 attach (`AddSubPrg.php`)** — DZIAŁAJĄCA ścieżka API klienta
+  („Dodaj napisy (tylko do programu)"). Dwufazowo przez **plain HTTP**
+  (`/run/AddSubPrg.php`, port 80 → działa też w bazowym buildzie C): faza
+  **Check** (read-only) → `OK-0` nowe / `OK-1` film znany / `OK-2` duplikat;
+  faza **Send** → `OK`. Pola `login,pass,hm,md,hs,fs,tm,dm,fp,im` **zaciemniane**
+  (`n24_obf`, jak CheckSub2), `fn` jawne (utf-8), `sf` = surowy plik. `hm` = OSH
+  **UPPER**, `hs` = `subtitle_hash` (rozmiar + suma pełnych słów 8B LE, UPPER),
+  `im` tylko gdy IMDB niepuste≠0. Multipart z `Content-Transfer-Encoding: 8bit`.
+  **postVer=v1.99.1** (endpoint NIE jest wersjonowany — inaczej niż
+  `AddSub.php`: „Masz Starą wersję programu!"). Wynik: napisy powiązane **po
+  haszu** (znajduje je `download`), **bez publicznego wpisu** → `--check-only`
+  (sama faza Check) wystarcza do bezpiecznej weryfikacji. CLI:
+  `napisy24 attach --movie … --srt … [--imdb tt..] [--check-only]`.
+- **Napisy24 upload (WWW, wpis publiczny)** idzie przez formularz `/dodaj-napisy` (Joomla+CB+
   RSForm), NIE przez `AddSub.php` (zablokowany serwerowo). Plik musi być **CRLF**,
   ≤2 linie/blok, bez nachodzących czasów — pilnuje tego `check_srt_for_napisy24`
   (walidacja lokalna; NIE używać `ajaxValidate`, bo zapisuje wpis).
