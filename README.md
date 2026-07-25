@@ -242,8 +242,8 @@ z wersją Python (dla zaimplementowanego podzbioru): offline `hash`, `fps`,
 (init/show/path). Wariant **TLS** (`aqnapi-c-tls.com`, monorepo Cosmopolitan +
 mbedtls) dodaje HTTPS: `opensubtitles`, `napisy24 weblogin/upload/delete`,
 `update` oraz URL `https://`. Nie przeniesione (użyj `aqnapi.py`): agregujący
-`upload`, napiprojekt `associate`/`account`, napisy24 `login`(klient)/`imdb`,
-opensubtitles `logout`/`guessit`. Pełna macierz: [`c/README.md`](c/README.md).
+`upload`, napisy24 `login`(klient)/`imdb`, opensubtitles
+`logout`/`formats`/`languages`/`guessit`. Pełna macierz: [`c/README.md`](c/README.md).
 
 ## Testy
 

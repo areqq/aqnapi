@@ -188,8 +188,8 @@ HTTP(S)/silnik napisów. `sync` (interaktywny TUI termios+ANSI oraz
 `--offset`/`--anchor`) i `config` (init/show/path, chmod 600) SĄ w porcie —
 bajtowo zgodne. **Przy KAŻDEJ zmianie w `aqnapi.py` pilnuj parności C**
 (`diff` wyjść, testy live). Nie przeniesione (użyj `aqnapi.py`): agregujący
-`upload`, napiprojekt `associate`/`account`, napisy24 `login`(klient)/`imdb`,
-opensubtitles `logout`/`guessit`.
+`upload`, napisy24 `login`(klient)/`imdb`, opensubtitles
+`logout`/`formats`/`languages`/`guessit`.
 
 Krytyczne dla zgodności z APE: nie wprowadzaj zależności od **`lzma`** ani
 **`ctypes`** — te moduły nie są wkompilowane w APE Pythona (reszta stdlib, w tym
