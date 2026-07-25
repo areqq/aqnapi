@@ -92,9 +92,18 @@ szczegółów protokołów.
   (`raw_http10_post`), a webapi/upload/delete idą przez `urllib` (HTTPS).
 - **napiprojekt pole pliku uploadu = `subtitles`** (małą literą!). Wielka litera
   → „Brak pliku z napisami".
-- **napiprojekt nie uwierzytelnia** na `api-napiprojekt3.php` (upload zawsze
-  anonim). Logowanie/konto/associate działa hasłem **jawnym** (`pass`) na
-  `api_user_account.php` / `api-movie-associate2.php` (metoda **GET**).
+- **napiprojekt `client` MUSI być z whitelisty** serwera. Nieznana nazwa (np.
+  `aqnapi`) → upload zwraca `<error><client> odmowa dostępu</error>`. Używamy
+  **`pynapi`** (`CLIENT`/`client` w download i upload). Nazwy per-tryb:
+  `dreambox` dla `file_info`, `allplayer` dla `search` — nie mieszać.
+- **napiprojekt upload z logowaniem DZIAŁA** (flaga `--login`): pola
+  **`user_nick`** + **`user_password`** (MAŁĄ literą; hasło `np_encode_password`
+  = XOR key=3 → base64) w POST do `api-napiprojekt3.php`. Pusty `SubtitlesAutor`
+  → login. Uwierzytelnione uploady idą do kolejki moderacji (rosną `dodane`).
+  Bez `--login` upload jest anonimowy. Endpoint konta `api_user_account.php`
+  jest **martwy (404)** — nie polegać na `verify_account`; auth idzie wyłącznie
+  przez pola POST uploadu. Associate działa hasłem **jawnym** (`pass`) na
+  `api-movie-associate2.php` (metoda **GET**).
 - **napiprojekt upload = archiwum 7z-AES** o nazwie `<hash>.zip` z wpisem
   `<hash>.txt`, hasło `iBlm8NTigvru0Jr0`. Budujemy je w czystym Pythonie
   (`write_7z_aes`): AES-256-CBC + KDF 7z (SHA-256, 2^19 rund, hasło UTF-16LE) +

@@ -38,7 +38,7 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 USER_AGENT_OS = f"aqnapi v{__version__}"
 
 __all__ = [
@@ -1787,7 +1787,10 @@ class NapiprojektClient:
     MOVIE_ASSOCIATE_URL = "http://napiprojekt.pl/api/api-movie-associate2.php"
     USER_ACCOUNT_URL = "http://napiprojekt.pl/api/api_user_account.php"
     FILE_INFO_URL = "http://napiprojekt.pl/api/api.php"
-    CLIENT = "aqnapi"
+    # Nazwa klienta MUSI być na whiteliście serwera (api-napiprojekt3.php).
+    # Nieznane nazwy zwracają "<client> odmowa dostępu" przy uploadzie.
+    # "pynapi" jest rozpoznawane (download i upload, w tym z logowaniem).
+    CLIENT = "pynapi"
     CLIENT_VER = __version__
 
     def __init__(self, timeout: float = DEFAULT_TIMEOUT):
@@ -1830,8 +1833,16 @@ class NapiprojektClient:
 
     def upload(self, movie_hash: str, subtitle_bytes: bytes, lang: str = "PL",
                author: str = "", corrected: bool = False, comment: str = "",
-               only_testing: bool = False) -> UploadResult:
-        """mode=512 (nowe) / 1024 (poprawki). Archiwum 7z-AES budowane lokalnie."""
+               only_testing: bool = False, authenticate: bool = False,
+               user: Optional[str] = None, password: Optional[str] = None) -> UploadResult:
+        """mode=512 (nowe) / 1024 (poprawki). Archiwum 7z-AES budowane lokalnie.
+
+        Bez `authenticate` upload jest anonimowy (`uploader=anonim`). Z
+        `authenticate=True` zostaje PRZYPISANY DO KONTA — kluczowe są pola
+        **`user_nick`** i **`user_password`** (MAŁĄ literą; hasło XOR+base64).
+        Dokumentacja podaje `User_nick`/`User_password` (wielką) — to błąd: PHP
+        `$_POST` jest case-sensitive, wielkie litery są ignorowane i upload leci
+        anonimowo. Uwierzytelnione uploady idą do kolejki moderacji."""
         archive = write_7z_aes(f"{movie_hash}.txt", subtitle_bytes)
         subs_md5 = bytes_md5(subtitle_bytes)
         fields: List[Tuple] = [
@@ -1840,6 +1851,13 @@ class NapiprojektClient:
             ("SubtitlesAutor", author),
             ("SubtitlesLang", lang.upper()),
         ]
+        if authenticate:
+            if not user or not password:
+                raise AuthError("Upload z logowaniem wymaga loginu i hasła.")
+            fields.append(("user_nick", user))
+            fields.append(("user_password", np_encode_password(password)))
+            if not author:
+                fields[2] = ("SubtitlesAutor", user)   # pusty autor -> login
         if comment:
             fields.append(("SubtitlesComment", comment))
         if only_testing:
@@ -1856,7 +1874,8 @@ class NapiprojektClient:
             root = ET.fromstring(xml.strip())
         except ET.ParseError as e:
             raise ServerError(f"Zła odpowiedź XML: {e}\n{xml[:300]}") from e
-        node = root.find("upload_subtitles") or root
+        wrapper = root.find("upload_subtitles")
+        node = wrapper if wrapper is not None else root
         status = (node.findtext("status") or "").strip().lower()
         error = (node.findtext("error") or "").strip()
         warning = (node.findtext("warning") or "").strip()
@@ -3112,11 +3131,14 @@ def _np_upload(args, cfg, srt_text: str) -> UploadResult:
     movie_hash = md5_10mb(args.movie)
     subtitle_bytes = srt_text.encode("utf-8")
     client = NapiprojektClient(args.timeout)
+    authenticate = bool(getattr(args, "login", False))
     return client.upload(movie_hash, subtitle_bytes,
                          lang=(args.lang or "PL").upper(),
                          author=args.translator or "",
                          corrected=args.corrected, comment=args.comment or "",
-                         only_testing=args.dry_run)
+                         only_testing=args.dry_run,
+                         authenticate=authenticate,
+                         user=cfg.np_user(args.np_user), password=cfg.np_pass(args.np_pass))
 
 
 def _n24_upload(args, cfg, srt_text: str) -> UploadResult:
@@ -3388,6 +3410,8 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--duration"); u.add_argument("--size", type=int); u.add_argument("--fps", type=float)
     u.add_argument("--season"); u.add_argument("--episode"); u.add_argument("--episode-title", dest="episode_title")
     u.add_argument("--corrected", action="store_true"); u.add_argument("--comment")
+    u.add_argument("--login", action="store_true",
+                   help="napiprojekt: upload z logowaniem (przypisany do konta)")
     u.add_argument("--fix-timing", action="store_true", dest="fix_timing")
     u.add_argument("--dry-run", action="store_true", dest="dry_run"); add_creds(u)
     u.set_defaults(func=cmd_upload)
@@ -3504,6 +3528,8 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("--srt", required=True); pu.add_argument("--movie", required=True)
     pu.add_argument("-l", "--lang", default="PL"); pu.add_argument("--translator")
     pu.add_argument("--corrected", action="store_true"); pu.add_argument("--comment")
+    pu.add_argument("--login", action="store_true",
+                    help="upload z logowaniem (przypisany do konta; user_nick/user_password)")
     pu.add_argument("--dry-run", action="store_true", dest="dry_run"); add_creds(pu)
     npp.set_defaults(func=cmd_np)
 

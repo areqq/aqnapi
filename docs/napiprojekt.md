@@ -15,7 +15,7 @@ jako **KOREKTA**.
 
 | URL | Metoda | Auth | Zastosowanie |
 |-----|--------|------|--------------|
-| `http://www.napiprojekt.pl/api/api-napiprojekt3.php` | POST | ❌ brak | pobieranie (mode=1), upload (mode=512/1024) — **anonimowo** |
+| `http://www.napiprojekt.pl/api/api-napiprojekt3.php` | POST | opcjonalny (`user_nick`/`user_password`) | pobieranie (mode=1), upload (mode=512/1024) — anonim lub **z logowaniem** |
 | `http://napiprojekt.pl/api/api-movie-search.php` | GET | — | wyszukiwarka katalogu (zwraca `MovieId`, IMDB, Filmweb, FDB) |
 | `http://napiprojekt.pl/api/api-movie-associate2.php` | GET | ✅ hasło jawne | powiązanie pliku z filmem (add) |
 | `http://napiprojekt.pl/api/api_user_account.php` | GET | ✅ hasło jawne | informacje o koncie |
@@ -35,10 +35,10 @@ jako **KOREKTA**.
 Oficjalny PDF opisuje parametr `User_password` kodowany XOR (klucz=3) → base64
 i przekazywany do `api-napiprojekt3.php`. **W praktyce:**
 
-- **`api-napiprojekt3.php` NIE uwierzytelnia użytkownika.** Tryby wymagające
-  logowania (mode=32 konto, mode=128 skojarzenie) odrzucają **każde** hasło
-  (jawne, XOR+base64, MD5) komunikatem „Błędny login lub hasło". Upload
-  (mode=512) przechodzi, ale zawsze jako **anonim**.
+- **`api-napiprojekt3.php` — upload przyjmuje logowanie** przez pola
+  `user_nick` + `user_password` (małą literą; hasło XOR+base64). Bez tych pól
+  upload jest **anonimowy**. Pozostałe tryby wymagające konta (mode=32, mode=128)
+  odrzucają hasła na tym endpoincie — autoryzacja konta idzie osobnymi URL-ami.
 - **Prawdziwa autoryzacja działa hasłem JAWNYM** (plaintext) w parametrze `pass`
   na dedykowanych endpointach klienta: `api_user_account.php`,
   `api-movie-associate2.php`.
@@ -141,7 +141,7 @@ POST **multipart/form-data** na `api-napiprojekt3.php`:
 | `SubtitlesLang` | `PL` / `ENG` |
 | `SubtitlesComment` | komentarz (dla poprawek) |
 | `OnlyTesting` | `1` → walidacja bez zapisu (tryb testowy) |
-| `User_nick`, `User_password` | opcjonalne (i tak ignorowane — patrz niżej) |
+| `user_nick`, `user_password` | **MAŁĄ literą** → upload przypisany do konta (patrz niżej) |
 | **`subtitles`** (plik) | archiwum 7zip, typ `subtitles/zip` |
 
 Archiwum: **7zip** z hasłem `iBlm8NTigvru0Jr0`, nazwa `<hashFilmu>.zip`,
@@ -152,8 +152,21 @@ parametru z hashem nie ma).
 > Nagłówek tabeli w PDF („Subtitles") jest mylący; wielka litera → błąd
 > „Brak pliku z napisami". Właściwa jest dopiero nota „w parametrze subtitles".
 
-> **KOREKTA — anonimowość:** upload nie uwierzytelnia (patrz §2). Napisy
-> wgrywają się, ale zawsze z `uploader=anonim`, niezależnie od podanego konta.
+> **Upload z logowaniem (`--login`):** aby przypisać upload do konta, wyślij pola
+> **`user_nick`** i **`user_password`** pisane **małą literą** (`user_password`
+> = hasło XOR key=3 → base64, funkcja `np_encode_password`). Dokumentacja podaje
+> `User_nick`/`User_password` (wielką) — to **błąd**: PHP `$_POST` jest
+> case-sensitive, więc wielkie litery są ignorowane i upload leci anonimowo.
+> Pusty `SubtitlesAutor` przy `--login` domyślnie = login. Bez `--login` upload
+> jest **anonimowy** (`uploader=anonim`). Uwierzytelnione uploady trafiają do
+> **kolejki moderacji** (rośnie licznik `dodane` konta).
+>
+> **Nazwa `client`:** endpoint uploadu ma whitelistę — nieznana nazwa (np.
+> `aqnapi`) zwraca `<error><client> odmowa dostępu</error>`. `aqnapi` wysyła
+> `client=pynapi` (rozpoznawane przy download i upload).
+>
+> Endpoint konta `api_user_account.php` jest **martwy (404)** — walidacja konta
+> odbywa się wyłącznie przez pola POST samego uploadu.
 
 ### Budowa archiwum 7z-AES w aqnapi (czysty Python)
 
@@ -338,13 +351,15 @@ FPS potrzebny do konwersji MicroDVD → SRT jest dociągany m.in. z endpointu
 
 ```
 aqnapi napiprojekt upload --srt PLIK.srt --movie FILM [-l PL] \
-    [--translator autor] [--corrected --comment "..."] [--dry-run]
+    [--translator autor] [--corrected --comment "..."] [--login] [--dry-run]
 ```
 Wysyłka napisów: `mode=512` (nowe) lub `mode=1024` (poprawki — po `--corrected`).
 `--movie` to plik filmu, z którego liczony jest hash. Archiwum 7z-AES budowane
 jest **lokalnie w czystym Pythonie** (patrz §5). `--dry-run` → `OnlyTesting=1`
 (walidacja bez zapisu). `--translator` → `SubtitlesAutor`, `--comment` →
-`SubtitlesComment`.
+`SubtitlesComment`. `--login` → upload przypisany do konta napiprojekt
+(login/hasło z konfiguracji `[napiprojekt]` lub env `NAPI_USER`/`NAPI_PASS`;
+pola `user_nick`/`user_password`, trafia do kolejki moderacji).
 
 ```
 aqnapi napiprojekt search "tytuł"
