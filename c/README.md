@@ -39,6 +39,8 @@ guessit), search, sync (interaktywny TUI), config, update, URL Range.
 | **URL http(s) jako wejście** (`--movie`/`--srt`/`input`/…) | pobieranie **zakresowe** (HTTP Range): md5-10MiB → 10 MiB, OSH → rozmiar+2×64 KiB, FPS → prefiks 8 MiB (`fmemopen`), napisy → całość; Basic auth z `user:pass@`. **http w obu buildach; https tylko w wariancie TLS.** Hash 1.7 GB filmu bajtowo == Python (live, https) |
 | `napisy24 attach` (**AddSubPrg.php**, `--check-only`) | działająca ścieżka API klienta, **plain HTTP → oba buildy**. Dwufazowo Check→Send, pola zaciemniane (`n24_obf`), `hs`=`subtitle_hash`. Powiązanie po haszu, bez wpisu publicznego. Werdykt Check bajtowo == Python (live: OK-2 https, OK-0 lokalnie) |
 | `napisy24 login` (CheckLogin) / `imdb` (CheckIMDB) | plain HTTP, multipart klienta; login: pola zaciemniane, imdb: `imdbId` jawne. Wyjście bajtowo == Python (live: login ok/złe hasło, imdb) |
+| `napisy24 mediainfo`/`notify`/`trans`/`premieres` | plain HTTP (oba buildy): ChangeData/Notifiemail/Get+SetTrans/GetIMDB.php; pola zaciemniane (`n24_obf`), odpowiedź dekodowana `utf8_replace` (jak Python `.decode(utf-8,replace)`). Bajtowo == Python (live: premieres/trans/mediainfo-auto/notify-off) |
+| `napisy24 edit` (`--show`, `--set`, `--srt`) | **wariant TLS**: WWW `/dodaj-napisy?edytuj=` — scraper formularza RSForm (input/select/radio/checkbox), nadpisania + ponowny POST. `--show` bajtowo == Python (live) |
 
 Własna kryptografia zweryfikowana: **AES-256 (wektor FIPS-197)**, **SHA-256**,
 oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`).

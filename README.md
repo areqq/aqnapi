@@ -150,7 +150,8 @@ aqnapi sync WZÓR CEL          # interaktywna synchronizacja w 2 kolumnach
 aqnapi config init            # interaktywne ustawienie loginów/klucza API
 
 # per-serwis (aliasy: n24, np, os)
-aqnapi napisy24    {hash,login,download,search,getid,imdb,attach,upload,delete}
+aqnapi napisy24    {hash,login,download,search,getid,imdb,attach,upload,delete,
+                    mediainfo,notify,trans,premieres,edit}
 aqnapi napiprojekt {download,search,associate,account,upload,fileinfo}
 aqnapi opensubtitles {login,logout,search,download,formats,languages,guessit}
 ```
