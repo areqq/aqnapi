@@ -241,9 +241,8 @@ z wersją Python (dla zaimplementowanego podzbioru): offline `hash`, `fps`,
 `sync` (interaktywny TUI termios+ANSI oraz `--offset`/`--anchor`) i `config`
 (init/show/path). Wariant **TLS** (`aqnapi-c-tls.com`, monorepo Cosmopolitan +
 mbedtls) dodaje HTTPS: `opensubtitles`, `napisy24 weblogin/upload/delete`,
-`update` oraz URL `https://`. Nie przeniesione (użyj `aqnapi.py`): agregujący
-`upload`, napisy24 `login`(klient)/`imdb`, opensubtitles
-`logout`/`formats`/`languages`/`guessit`. Pełna macierz: [`c/README.md`](c/README.md).
+`update` oraz URL `https://`. Nie przeniesione (użyj `aqnapi.py`): tylko
+agregujący `upload` (multi-serwis). Pełna macierz: [`c/README.md`](c/README.md).
 
 ## Testy
 

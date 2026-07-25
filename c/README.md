@@ -9,8 +9,7 @@ poleceń** i jest **100% bajtowo zgodny** z Pythonem dla zaimplementowanego
 podzbioru. Wersja Python pozostaje kompletna i referencyjna; każda zmiana idzie
 w OBU wersjach (zob. `CLAUDE.md`). `sync` (interaktywny TUI termios+ANSI oraz
 `--offset`/`--anchor`) i `config` (init/show/path) SĄ tutaj. Nie przeniesione
-(użyj `aqnapi.py`): agregujący `upload`, napisy24 `login`(klient)/`imdb`,
-opensubtitles `logout`/`formats`/`languages`/`guessit`.
+(użyj `aqnapi.py`): tylko agregujący `upload` (multi-serwis).
 
 ## Zakres (stan bieżący)
 
@@ -38,12 +37,13 @@ opensubtitles `logout`/`formats`/`languages`/`guessit`.
 | `napiprojekt upload` (mode=512/1024, **7z-AES**, `--login`) | własny AES-256+SHA-256+kontener 7z; **archiwum rozpakowywalne przez `7z x`**; `--login` → pola `user_nick`/`user_password` (upload przypisany do konta); odpowiedź serwera == Python |
 | **URL http(s) jako wejście** (`--movie`/`--srt`/`input`/…) | pobieranie **zakresowe** (HTTP Range): md5-10MiB → 10 MiB, OSH → rozmiar+2×64 KiB, FPS → prefiks 8 MiB (`fmemopen`), napisy → całość; Basic auth z `user:pass@`. **http w obu buildach; https tylko w wariancie TLS.** Hash 1.7 GB filmu bajtowo == Python (live, https) |
 | `napisy24 attach` (**AddSubPrg.php**, `--check-only`) | działająca ścieżka API klienta, **plain HTTP → oba buildy**. Dwufazowo Check→Send, pola zaciemniane (`n24_obf`), `hs`=`subtitle_hash`. Powiązanie po haszu, bez wpisu publicznego. Werdykt Check bajtowo == Python (live: OK-2 https, OK-0 lokalnie) |
+| `napisy24 login` (CheckLogin) / `imdb` (CheckIMDB) | plain HTTP, multipart klienta; login: pola zaciemniane, imdb: `imdbId` jawne. Wyjście bajtowo == Python (live: login ok/złe hasło, imdb) |
 
 Własna kryptografia zweryfikowana: **AES-256 (wektor FIPS-197)**, **SHA-256**,
 oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`).
 
 | `update [--check]` | **wariant TLS**: HTTPS do GitHub API przez mbedtls, porównanie wersji, podmiana binarki. `--check` zweryfikowany na żywo |
-| `opensubtitles login/search/download` | **wariant TLS**: pełny klient REST v1 (Api-Key + JWT), HTTPS przez mbedtls, parser JSON. **search i download bajtowo zgodne z Pythonem** (zweryfikowane kluczem na żywo) |
+| `opensubtitles login/logout/search/download/formats/languages/guessit` | **wariant TLS**: pełny klient REST v1 (Api-Key + JWT), HTTPS przez mbedtls, parser JSON. login zapisuje cache tokenu (kompatybilny z Pythonem), logout czyta cache + DELETE. `guessit` — własny pretty-printer JSON (`indent=2`, `ensure_ascii=False`). **Wszystkie bajtowo zgodne z Pythonem** (zweryfikowane kluczem na żywo) |
 | `napisy24 weblogin` | **wariant TLS**: logowanie WWW (Joomla/Community Builder `cb-login`) — cookie-jar + skrobanie tokena CSRF + sesja RSForm. Zweryfikowane na żywo („Zalogowano") |
 | `napisy24 upload/delete` | **wariant TLS**: upload przez formularz RSForm (multipart, walidacja lokalna ≤2 linie + normalizacja CRLF), delete `?usun=`. Bezpiecznie zweryfikowane: `--dry-run` (jak Python) + `delete` przez autoryzowaną sesję (bez realnego wpisu) |
 
@@ -66,11 +66,11 @@ opensubtitles) przechodzą, a **podstawiony fałszywy CA jest odrzucany** (test
 negatywny). Fallback: systemowy `ca-certificates.crt`, ostatecznie brak
 weryfikacji, gdy bundla nie ma.
 
-**Jeszcze nie w C** (drobne, kolejne etapy): agregujący `upload`, napisy24
-`login` (CheckLogin) i `imdb` (CheckIMDB), opensubtitles `logout`/`formats`/
-`languages`/`guessit`. Wszystkie duże obszary (offline, downloady, upload
-7z-AES/`--login`, napiprojekt account/associate, napisy24 attach/WWW, search,
-OpenSubtitles, sync interaktywny, config, update, URL Range, TLS+CA) są w C.
+**Jeszcze nie w C**: już tylko agregujący `upload` (multi-serwis; per-serwis
+uploady/attach są). Wszystko inne jest w C — offline, downloady, upload
+7z-AES/`--login`, napiprojekt account/associate, napisy24 login/imdb/attach/WWW,
+search, OpenSubtitles (login/logout/search/download/formats/languages/guessit),
+sync interaktywny, config, update, URL Range, TLS+CA.
 
 > `iso-8859-2` jako drugorzędny fallback kodowania oraz kilka rzadkich, niezdefiniowanych
 > bajtów cp1250 są uproszczone względem Pythona (nie dotyczy typowych polskich napisów).
