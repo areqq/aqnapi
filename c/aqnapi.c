@@ -26,7 +26,7 @@
 #include <sys/ioctl.h>
 #include "third_party/zlib/zlib.h"
 
-#define VERSION "1.0.6"
+#define VERSION "1.0.7"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
@@ -99,6 +99,7 @@ static int is_url(const char*s){ return s && (!strncmp(s,"http://",7)||!strncmp(
 static unsigned char* url_read_range(const char*url,long start,long length,size_t*outlen);
 static unsigned char* url_read_full(const char*url,size_t*outlen);
 static long url_size(const char*url);
+static void input_basename(const char*path,char*out,size_t osz);  /* def. niżej */
 /* Rozmiar wejścia (URL lub plik lokalny). */
 static long input_size(const char*path){ return is_url(path)? url_size(path) : file_size(path); }
 
@@ -886,7 +887,7 @@ static unsigned char* zip_extract(const unsigned char*z,size_t zn,size_t*outlen)
 static unsigned char* n24_checksub_agent(const char*movie,const char*lang,size_t*outlen){
     char osh[17]; if(oshash(movie,osh)!=0) return NULL; char md[33]; md5_10mb(movie,md);
     for(char*p=osh;*p;p++)*p=toupper((unsigned char)*p);
-    char fs[32]; snprintf(fs,sizeof fs,"%ld",file_size(movie)); const char*fn=basename_of(movie);
+    char fs[32]; snprintf(fs,sizeof fs,"%ld",input_size(movie)); char fnb[512]; input_basename(movie,fnb,sizeof fnb); const char*fn=fnb;
     char*efn=url_encode(fn);
     SB body; sb_init(&body); char tmp[512];
     snprintf(tmp,sizeof tmp,"postAction=CheckSub&ua=dmnapi&ap=4lumen28&fh=%s&md=%s&fs=%s&fn=%s&nl=%s",osh,md,fs,efn,lang); sb_puts(&body,tmp); free(efn);
