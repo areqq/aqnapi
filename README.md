@@ -93,6 +93,28 @@ aqnapi sync wzor.srt do_sync.srt
 aqnapi sync wzor.srt do_sync.srt --offset -2.5           # albo bez UI: proste przesunięcie
 ```
 
+### URL jako plik wejściowy
+
+Każdy plik wejściowy (`--movie`, `--srt`, `input`, pozycyjne, `merge`) może być
+adresem `http(s)://` z opcjonalnym logowaniem `user:pass@` (Basic auth, jak
+`curl -u`). Pobierane są **tylko potrzebne fragmenty** (nagłówek HTTP Range) —
+np. do hasza filmu ściągane jest jedynie pierwsze 10 MiB, a nie cały plik:
+
+```bash
+# hash filmu prosto z serwera (pobiera ~10 MiB + 2×64 KiB, nie cały film)
+aqnapi hash "https://user:haslo@serwer/film.mkv"
+
+# upload napisów, gdzie film i napisy są zdalne (hash liczony z fragmentu)
+aqnapi napiprojekt upload --movie "https://user:haslo@serwer/film.mkv" \
+    --srt "https://user:haslo@serwer/film.srt" --login
+
+# konwersja napisów z URL-a (nazwa wyjścia z nazwy w URL-u)
+aqnapi convert "https://user:haslo@serwer/film.srt" -o film.srt
+```
+
+> W wersji C `https://` wymaga wariantu TLS (`aqnapi-c-tls.com`); `http://`
+> działa w obu. Serwer musi wspierać żądania Range (dla hasza OSH/„ogona").
+
 ## Macierz możliwości
 
 | Operacja | napisy24 (`n24`) | napiprojekt (`np`) | opensubtitles (`os`) |

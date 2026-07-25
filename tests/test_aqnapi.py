@@ -644,5 +644,86 @@ class TestCli(unittest.TestCase):
             os.remove(path)
 
 
+class TestUrlInput(unittest.TestCase):
+    """URL http jako wejście: hash/rozmiar/odczyt przez Range (lokalny serwer)."""
+
+    def _serve(self, data, support_range=True):
+        import http.server
+        import re
+        import threading
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _check_auth(self):
+                # wymaga Basic aq:tajne, by przetestować user:pass@
+                got = self.headers.get("Authorization")
+                if got != "Basic YXE6dGFqbmU=":
+                    self.send_response(401)
+                    self.end_headers()
+                    return False
+                return True
+
+            def do_GET(self):
+                if not self._check_auth():
+                    return
+                rng = self.headers.get("Range")
+                if rng and support_range:
+                    m = re.match(r"bytes=(\d+)-(\d*)", rng)
+                    s = int(m.group(1))
+                    e = int(m.group(2)) if m.group(2) else len(data) - 1
+                    e = min(e, len(data) - 1)
+                    body = data[s:e + 1]
+                    self.send_response(206)
+                    self.send_header("Content-Range", "bytes %d-%d/%d" % (s, e, len(data)))
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        return "http://aq:tajne@127.0.0.1:%d/movie.bin" % srv.server_address[1]
+
+    def test_hash_and_size_via_range(self):
+        data = os.urandom(500_000)
+        path = make_file(data)
+        self.addCleanup(os.remove, path)
+        url = self._serve(data, support_range=True)
+        self.assertEqual(aqnapi.oshash(url), aqnapi.oshash(path))
+        self.assertEqual(aqnapi.md5_10mb(url), aqnapi.md5_10mb(path))
+        self.assertEqual(aqnapi.url_size(url), len(data))
+
+    def test_read_full_and_stem(self):
+        data = b"1\r\n00:00:01,000 --> 00:00:02,000\r\nCze\xc5\x9b\xc4\x87\r\n"
+        url = self._serve(data, support_range=True)
+        # przy pełnym odczycie ścieżka /movie.bin -> stem "movie"
+        self.assertEqual(aqnapi.read_input_bytes(url), data)
+        self.assertEqual(aqnapi._input_stem(url), "movie")
+        self.assertTrue(aqnapi.is_url(url))
+
+    def test_range_required_for_tail(self):
+        # serwer ignorujący Range (zwraca 200) -> odczyt ogona musi rzucić błąd,
+        # nie zwracać cicho złych bajtów
+        data = os.urandom(500_000)
+        url = self._serve(data, support_range=False)
+        with self.assertRaises(aqnapi.NetworkError):
+            aqnapi.oshash(url)
+
+    def test_bad_auth_raises(self):
+        data = os.urandom(200_000)
+        # zły login w URL -> 401 -> NetworkError
+        base = self._serve(data, support_range=True)
+        bad = base.replace("aq:tajne@", "aq:zle@")
+        with self.assertRaises(aqnapi.NetworkError):
+            aqnapi.url_size(bad)
+
+
 if __name__ == "__main__":
     unittest.main()

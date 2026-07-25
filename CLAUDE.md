@@ -37,6 +37,30 @@ Napisy24.pl, napiprojekt.pl, OpenSubtitles.com. **Python 3.9+, wyłącznie
 biblioteka standardowa** — zero zależności pip, żadnych binarek zewnętrznych w
 ścieżce działania.
 
+## URL http(s) jako ścieżka wejściowa
+
+Każdy argument będący **plikiem wejściowym** (`--movie`, `--srt`, `input`,
+pozycyjne `file`, `reference`/`target`, listy do `merge`) może być URL-em
+`http(s)://` z opcjonalnym `user:pass@` (Basic auth, jak curl -u). Wykrywa to
+`is_url()` na poziomie odczytu — **nie** ma podmiany argumentów ani plików
+tymczasowych.
+
+Zasada: **pobieraj tylko potrzebne fragmenty (HTTP Range), minimalna pamięć** —
+film 1.7 GB nigdy nie leci w całości:
+- `md5_10mb` (hash napiprojekt) → tylko pierwsze 10 MiB (`Range: bytes=0-...`).
+- `oshash` (OSH) → rozmiar (HEAD/Content-Range) + dwa zakresy po 64 KiB.
+- `fps_from_file` → prefiks `FPS_URL_PREFIX` (8 MiB); MP4 z moov na końcu → brak
+  FPS z URL-a (fallback). Python parsuje z `io.BytesIO`, C przez `fmemopen`.
+- napisy (`read_input_bytes` / C `read_input`) → całość (to kilka KB).
+
+**Pułapka Range:** `url_read_range` dla `start>0` **musi** dostać `206`; przy
+`200` (serwer zignorował Range) rzuca błąd — inaczej „ogon" OSH byłby po cichu
+zły. `url_size` używa HEAD (Python czyta tylko nagłówki), by nie ściągać ciała.
+Nazwa wyjścia pochodzi z nazwy pliku w URL-u (`_input_stem` / C `input_stem`),
+nie ze ścieżki serwera. **C:** https działa tylko w wariancie TLS
+(`aqnapi-c-tls.com`); http w obu. Regresje: `TestUrlInput` (lokalny serwer Range,
+offline).
+
 ## Twarde ograniczenia (nie łam)
 
 - **Tylko stdlib.** Nie dodawaj `requests`, `py7zr`, `lxml` itd. Dozwolone
