@@ -9,8 +9,8 @@ poleceń** i jest **100% bajtowo zgodny** z Pythonem dla zaimplementowanego
 podzbioru. Wersja Python pozostaje kompletna i referencyjna; każda zmiana idzie
 w OBU wersjach (zob. `CLAUDE.md`). `sync` (interaktywny TUI termios+ANSI oraz
 `--offset`/`--anchor`) i `config` (init/show/path) SĄ tutaj. Nie przeniesione
-(użyj `aqnapi.py`): agregujący `upload`, napiprojekt `associate`/`account`,
-napisy24 `login`(klient)/`imdb`, opensubtitles `logout`/`guessit`.
+(użyj `aqnapi.py`): agregujący `upload`, napisy24 `login`(klient)/`imdb`,
+opensubtitles `logout`/`formats`/`languages`/`guessit`.
 
 ## Zakres (stan bieżący)
 
@@ -33,6 +33,7 @@ napisy24 `login`(klient)/`imdb`, opensubtitles `logout`/`guessit`.
 | `search` / `napiprojekt search` / `napisy24 search` (agreg. + per-serwis) | stdout bajtowo == Python (live) |
 | `get` (agregator np→n24, HTTP) | pobiera i zapisuje SRT |
 | `napiprojekt download` / `fileinfo` (HTTP) | bajtowo |
+| `napiprojekt account` / `associate` (HTTP GET, hasło jawne) | account: dane konta (parser XML w kolejności dokumentu); associate: powiązanie hasza z `id_filmu`. Werdykt/wyjście bajtowo == Python (live: areq) |
 | `napisy24 download` (CheckSubAgent+ZIP) / `getid` (download.php+ZIP) | **plik+stdout bajtowo** (ZIP-inflate przez zlib) |
 | `napiprojekt upload` (mode=512/1024, **7z-AES**, `--login`) | własny AES-256+SHA-256+kontener 7z; **archiwum rozpakowywalne przez `7z x`**; `--login` → pola `user_nick`/`user_password` (upload przypisany do konta); odpowiedź serwera == Python |
 | **URL http(s) jako wejście** (`--movie`/`--srt`/`input`/…) | pobieranie **zakresowe** (HTTP Range): md5-10MiB → 10 MiB, OSH → rozmiar+2×64 KiB, FPS → prefiks 8 MiB (`fmemopen`), napisy → całość; Basic auth z `user:pass@`. **http w obu buildach; https tylko w wariancie TLS.** Hash 1.7 GB filmu bajtowo == Python (live, https) |
@@ -65,10 +66,11 @@ opensubtitles) przechodzą, a **podstawiony fałszywy CA jest odrzucany** (test
 negatywny). Fallback: systemowy `ca-certificates.crt`, ostatecznie brak
 weryfikacji, gdy bundla nie ma.
 
-**Jeszcze nie w C** (drobne, kolejne etapy): napiprojekt `account`/`associate`
-(HTTP z hasłem jawnym), napisy24 `login` (CheckLogin — jest w wersji Python) i
-`imdb` (CheckIMDB). Wszystkie duże obszary (offline, downloady, upload 7z-AES,
-search, OpenSubtitles, napisy24 WWW, sync interaktywny, update, TLS+CA) są w C.
+**Jeszcze nie w C** (drobne, kolejne etapy): agregujący `upload`, napisy24
+`login` (CheckLogin) i `imdb` (CheckIMDB), opensubtitles `logout`/`formats`/
+`languages`/`guessit`. Wszystkie duże obszary (offline, downloady, upload
+7z-AES/`--login`, napiprojekt account/associate, napisy24 attach/WWW, search,
+OpenSubtitles, sync interaktywny, config, update, URL Range, TLS+CA) są w C.
 
 > `iso-8859-2` jako drugorzędny fallback kodowania oraz kilka rzadkich, niezdefiniowanych
 > bajtów cp1250 są uproszczone względem Pythona (nie dotyczy typowych polskich napisów).

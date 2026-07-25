@@ -38,7 +38,7 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.0.8"
+__version__ = "1.0.9"
 USER_AGENT_OS = f"aqnapi v{__version__}"
 
 __all__ = [

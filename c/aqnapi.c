@@ -9,8 +9,8 @@
  * Wariant TLS (aqnapi-c-tls.com, monorepo + mbedtls) dodaje HTTPS: opensubtitles
  *   (login/search/download), napisy24 weblogin/upload/delete, update, URL https.
  *
- * Nie przeniesione (użyj aqnapi.py): agregujący `upload`, napiprojekt
- * associate/account, napisy24 login(klient)/imdb, opensubtitles logout/guessit.
+ * Nie przeniesione (użyj aqnapi.py): agregujący `upload`, napisy24
+ * login(klient)/imdb, opensubtitles logout/formats/languages/guessit.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,7 +25,7 @@
 #include <sys/ioctl.h>
 #include "third_party/zlib/zlib.h"
 
-#define VERSION "1.0.8"
+#define VERSION "1.0.9"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
@@ -1226,6 +1226,21 @@ static int cmd_config(const char*sub,const char*ov){
 static char* xml_first(const char*hay,const char*tag){ char op[48],cl[48]; snprintf(op,sizeof op,"<%s>",tag); snprintf(cl,sizeof cl,"</%s>",tag);
     const char*s=strstr(hay,op); if(!s){ char*e=xmalloc(1); e[0]=0; return e; } s+=strlen(op); const char*e=strstr(s,cl); if(!e){ char*x=xmalloc(1); x[0]=0; return x; }
     size_t n=e-s; char*o=xmalloc(n+1); memcpy(o,s,n); o[n]=0; html_unescape(o); strip_inplace(o); return o; }
+/* Iteruj elementy XML w kolejności dokumentu. Zwraca 1 i ustawia tag + inner
+ * (malloc), przesuwa *pp za </tag>. Pomija <?..?>, <!..>, </..>. */
+static int xml_next(const char**pp,char*tag,size_t tagsz,char**inner){
+    const char*p=*pp;
+    for(;;){ while(*p && *p!='<') p++; if(!*p) return 0;
+        if(p[1]=='?'||p[1]=='!'||p[1]=='/'){ const char*gt=strchr(p,'>'); if(!gt) return 0; p=gt+1; continue; } break; }
+    const char*ts=p+1,*te=ts; while(*te && *te!='>' && *te!='/' && !is_ascii_ws(*te)) te++;
+    size_t tn=(size_t)(te-ts); if(tn>=tagsz) tn=tagsz-1; memcpy(tag,ts,tn); tag[tn]=0;
+    const char*ot=strchr(p,'>'); if(!ot) return 0;
+    if(ot>p && ot[-1]=='/'){ char*z=xmalloc(1); z[0]=0; *inner=z; *pp=ot+1; return 1; }
+    char close[80]; snprintf(close,sizeof close,"</%s>",tag);
+    const char*ce=strstr(ot+1,close);
+    if(!ce){ char*z=xmalloc(1); z[0]=0; *inner=z; *pp=ot+1; return 1; }
+    size_t il=(size_t)(ce-(ot+1)); char*in=xmalloc(il+1); memcpy(in,ot+1,il); in[il]=0; *inner=in;
+    *pp=ce+strlen(close); return 1; }
 static void norm_imdb(const char*in,char*out,size_t osz){ char dig[32]; int k=0; for(const char*p=in;*p&&k<31;p++) if(isdigit((unsigned char)*p)) dig[k++]=*p; dig[k]=0;
     if(k==0){ snprintf(out,osz,"%s",in); return; } char z[8]=""; int pad=7-k; for(int i=0;i<pad&&i<7;i++) z[i]='0'; z[pad>0?pad:0]=0; snprintf(out,osz,"tt%s%s",z,dig); }
 static void extract_tt(const char*s,char*out,size_t osz){ out[0]=0; /* znajdź "tt" po którym są cyfry (jak regex tt\d+) */
@@ -1309,6 +1324,51 @@ static int cmd_np_upload(const char*cfgpath,const char*movie,const char*srt,cons
     int rc; if(ok){ printf("[OK] %s\n", wr[0]?wr:(er[0]?er:st)); rc=0; }
     else { printf("[BŁĄD] %s\n", er[0]?er:(wr[0]?wr:(st[0]?st:"serwer odrzucił upload"))); rc=1; }
     free(st);free(wr);free(er);free(xml); return rc;
+}
+
+/* creds napiprojekt: config [napiprojekt] user/pass + env NAPI_USER/NAPI_PASS */
+static void np_creds(const char*cfgpath,char*user,size_t us,char*pass,size_t ps){
+    Ini ini; ini_load(config_path(cfgpath),&ini);
+    snprintf(user,us,"%s",ini_get(&ini,1,"user")); snprintf(pass,ps,"%s",ini_get(&ini,1,"pass"));
+    const char*eu=getenv("NAPI_USER"),*ep=getenv("NAPI_PASS");
+    if(eu&&*eu)snprintf(user,us,"%s",eu); if(ep&&*ep)snprintf(pass,ps,"%s",ep);
+}
+/* napiprojekt account: api_user_account.php (GET, hasło jawne) -> parent.child: value */
+static int cmd_np_account(const char*cfgpath){
+    char user[128],pass[128]; np_creds(cfgpath,user,sizeof user,pass,sizeof pass);
+    /* jak Python: bez pre-checku pustych creds — serwer i tak zwróci 404 */
+    char*eu=url_encode(user),*ep=url_encode(pass);
+    char path[400]; snprintf(path,sizeof path,"/api/api_user_account.php?user=%s&pass=%s",eu,ep); free(eu); free(ep);
+    size_t bl; char*body=http_get_url("napiprojekt.pl",path,&bl); if(!body) die("napiprojekt: błąd połączenia");
+    const char*p=body; char root[64]; char*rin=NULL;
+    /* złe creds -> serwer zwraca 404/HTML (nie-XML) -> jak ParseError w Pythonie */
+    int haveroot = xml_next(&p,root,sizeof root,&rin);
+    if(!haveroot || (strcmp(root,"user_info")!=0 && !strstr(body,"<user_info"))){
+        free(rin); free(body); fprintf(stderr,"Błąd uwierzytelnienia: Błędne dane logowania lub zła odpowiedź\n"); return 2; }
+    if(strcmp(root,"user_info")!=0){
+        free(rin); free(body); fprintf(stderr,"Błąd uwierzytelnienia: Błędne dane logowania (brak danych konta)\n"); return 2; }
+    const char*q=rin; char sec[64]; char*sin=NULL;
+    while(xml_next(&q,sec,sizeof sec,&sin)){
+        const char*r=sin; char key[64]; char*val=NULL;
+        while(xml_next(&r,key,sizeof key,&val)){ html_unescape(val); strip_inplace(val); printf("%s.%s: %s\n",sec,key,val); free(val); }
+        free(sin); }
+    free(rin); free(body); return 0;
+}
+/* napiprojekt associate: api-movie-associate2.php (GET) — powiąż hasz pliku z id_filmu */
+static int cmd_np_associate(const char*cfgpath,const char*movie,const char*movie_id){
+    if(!movie||!movie_id){ fprintf(stderr,"napiprojekt associate wymaga <film> <id_filmu>\n"); return 2; }
+    /* kolejność jak w Pythonie: najpierw hash pliku, potem kontrola creds */
+    char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); return 1; }
+    char user[128],pass[128]; np_creds(cfgpath,user,sizeof user,pass,sizeof pass);
+    if(!user[0]||!pass[0]){ fprintf(stderr,"Błąd uwierzytelnienia: Powiązanie wymaga loginu i hasła\n"); return 2; }
+    char*eu=url_encode(user),*ep=url_encode(pass),*ei=url_encode(movie_id);
+    char path[500]; snprintf(path,sizeof path,"/api/api-movie-associate2.php?nick=%s&pass=%s&id_pliku=%s&id_filmu=%s",eu,ep,md,ei);
+    free(eu); free(ep); free(ei);
+    size_t bl; char*body=http_get_url("napiprojekt.pl",path,&bl); if(!body) die("napiprojekt: błąd połączenia");
+    char*st=xml_first(body,"status"); for(char*p=st;*p;p++)*p=tolower((unsigned char)*p);
+    int ok=!strcmp(st,"success")||!strcmp(st,"ok");
+    printf("[%s] %s\n", ok?"OK":"BŁĄD", st[0]?st:"brak statusu");
+    free(st); free(body); return ok?0:1;
 }
 
 /* ---------------------------------------------------------------- HTTPS (TLS) + update
@@ -1856,6 +1916,8 @@ int main(int argc,char**argv){
         if(!strcmp(sub,"fileinfo")){ if(!a1){usage();return 2;} return cmd_np_fileinfo(a1); }
         if(!strcmp(sub,"search")){ const char*t=a1?a1:(title?title:query); if(!t){usage();return 2;} return np_search(t); }
         if(!strcmp(sub,"upload")){ return cmd_np_upload(cfgpath,movie,srt,lang,translator,corrected,comment,testing,do_login); }
+        if(!strcmp(sub,"account")){ return cmd_np_account(cfgpath); }
+        if(!strcmp(sub,"associate")){ const char*mv=a1?a1:movie; return cmd_np_associate(cfgpath,mv,nfiles>2?files[2]:NULL); }
         fprintf(stderr,"napiprojekt: '%s' nieobsługiwane w wersji C (użyj aqnapi.py)\n",sub); return 2; }
     if(!strcmp(cmd,"napisy24")||!strcmp(cmd,"n24")){ const char*sub=nfiles>0?files[0]:NULL,*a1=nfiles>1?files[1]:NULL; if(!sub){usage();return 2;}
         if(!strcmp(sub,"hash")){ if(!a1){usage();return 2;} return cmd_hash(a1); }
