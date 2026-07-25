@@ -123,8 +123,8 @@ aqnapi convert "https://user:haslo@serwer/film.srt" -o film.srt
 | szukanie po IMDB / tytule / frazie | ✅ | ✅ (katalog) | ✅ |
 | pobieranie po ID napisu | ✅ | — | ✅ |
 | logowanie / konto | ✅ | ✅ | ✅ (JWT) |
-| **upload napisów** | ✅ (formularz WWW) | ✅ (7z-AES) | ✗ (patrz niżej) |
-| powiązanie pliku z filmem | — | ✅ | — |
+| **upload napisów** | ✅ `attach` (API klienta, po haszu) + `upload` (formularz WWW) | ✅ (7z-AES) | ✗ (patrz niżej) |
+| powiązanie pliku z filmem | ✅ (`attach`, po haszu) | ✅ | — |
 | usuwanie własnych napisów | ✅ (best-effort) | — | — |
 
 > **Upload do OpenSubtitles** nie jest obsługiwany, bo ich REST API v1 nie ma
@@ -150,7 +150,7 @@ aqnapi sync WZÓR CEL          # interaktywna synchronizacja w 2 kolumnach
 aqnapi config init            # interaktywne ustawienie loginów/klucza API
 
 # per-serwis (aliasy: n24, np, os)
-aqnapi napisy24    {hash,login,download,search,getid,imdb,upload,delete}
+aqnapi napisy24    {hash,login,download,search,getid,imdb,attach,upload,delete}
 aqnapi napiprojekt {download,search,associate,account,upload,fileinfo}
 aqnapi opensubtitles {login,logout,search,download,formats,languages,guessit}
 ```
