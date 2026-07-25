@@ -38,7 +38,7 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.0.11"
+__version__ = "1.0.12"
 USER_AGENT_OS = f"aqnapi v{__version__}"
 
 __all__ = [
@@ -1768,7 +1768,8 @@ class Napisy24Client:
     # (utf-8), sf to surowy plik .srt. Endpoint NIE jest wersjonowany (działa
     # z postVer=v1.99.1), inaczej niż zablokowany AddSub.php.
 
-    def _multipart_prg(self, fields: List[Tuple], files: Tuple = ()) -> str:
+    def _multipart_prg(self, fields: List[Tuple], files: Tuple = (),
+                       endpoint: str = "AddSubPrg.php") -> str:
         boundary = "----aqnapiprg000001"
         body = bytearray()
         for name, value, charset in fields:
@@ -1787,7 +1788,7 @@ class Napisy24Client:
             body += payload + b"\r\n"
         body += ("--%s--\r\n" % boundary).encode()
         ct = "multipart/form-data; boundary=" + boundary
-        raw = raw_http10_post(self.HOST, "/run/AddSubPrg.php", ct, bytes(body),
+        raw = raw_http10_post(self.HOST, "/run/" + endpoint, ct, bytes(body),
                               user_agent="Mozilla/4.0", timeout=self.timeout)
         return raw.decode("utf-8", errors="replace").strip()
 
@@ -1843,6 +1844,92 @@ class Napisy24Client:
                              duration, resolution, fps, imdb,
                              attach_file=verdict.startswith("OK-0"))
         return UploadResult("napisy24", resp.startswith("OK"), "%s | %s" % (verdict, resp), resp)
+
+    # ---- ChangeData / Notify / Trans / GetIMDB (protokół klienta, /run/) ----
+
+    def checksub_lp(self, movie_path: str, lang: str = "pl") -> str:
+        """Zwróć identyfikator rekordu `lp` z CheckSub2 (dla mediainfo)."""
+        info = self.checksub(movie_path, lang=lang)
+        return str(info.get("lp", "") or "")
+
+    def change_data(self, login, password, record_id, movie_path, duration="",
+                    resolution="", fps="", lang="pl") -> str:
+        """ChangeData.php — powiąż hash filmu + media info z rekordem `lp`.
+        `data` = "<lp>|<czas>|<rozdzielczość>|<fps>". Zwraca tekst serwera."""
+        hashes = file_hashes(movie_path)
+        if not fps:
+            f = fps_from_file(movie_path)
+            if f:
+                fps = "%.3f" % f
+        data = "%s|%s|%s|%s" % (record_id, duration, resolution, fps)
+        fields = [
+            ("type", n24_obf("mediainfo"), None),
+            ("postVer", self.CLIENT_VER, None),
+            ("login", n24_obf(login), None),
+            ("pass", n24_obf(password), None),
+            ("data", n24_obf(data), None),
+            ("fh", n24_obf(str(hashes["osh"]).upper()), None),
+            ("md", n24_obf(str(hashes["md5_10mb"])), None),
+            ("fs", n24_obf(str(hashes["size"])), None),
+            ("fn", n24_obf(str(hashes["name"])), None),
+            ("n24pref", "1", None),
+            ("nl", n24_obf(lang), None),
+        ]
+        return self._multipart_prg(fields, endpoint="ChangeData.php")
+
+    def notify(self, login, password, movie_path, enable=True, sms_code=None,
+               lang="pl") -> str:
+        """Notifiemail.php / NotifiSMS.php — powiadom, gdy pojawią się napisy."""
+        hashes = file_hashes(movie_path)
+        fields = [
+            ("postAction", "SetNotifi", None),
+            ("postVer", self.CLIENT_VER, None),
+            ("login", n24_obf(login), None),
+            ("pass", n24_obf(password), None),
+            ("data", n24_obf("1" if enable else "0"), None),
+        ]
+        if sms_code is not None:
+            fields.append(("code", n24_obf(sms_code), None))
+        fields += [
+            ("fh", n24_obf(str(hashes["osh"]).upper()), None),
+            ("md", n24_obf(str(hashes["md5_10mb"])), None),
+            ("fs", n24_obf(str(hashes["size"])), None),
+            ("nl", n24_obf(lang), None),
+        ]
+        endpoint = "NotifiSMS.php" if sms_code is not None else "Notifiemail.php"
+        return self._multipart_prg(fields, endpoint=endpoint)
+
+    def get_trans(self, user_id) -> List[List[str]]:
+        """GetTrans.php — lista projektów tłumaczeń konta (rekordy '~', pola '^')."""
+        resp = self._multipart_prg(
+            [("PostAction", "GET", None), ("userId", str(user_id), None)],
+            endpoint="GetTrans.php")
+        out = []
+        for rec in resp.split("~"):
+            rec = rec.strip()
+            if rec:
+                out.append(rec.split("^"))
+        return out
+
+    def set_trans(self, login, password, user_id, trans_id, info="",
+                  progress="") -> str:
+        """SetTrans.php — aktualizuj info/postęp projektu tłumaczenia."""
+        fields = [
+            ("type", n24_obf("mediainfo"), None),
+            ("postVer", self.CLIENT_VER, None),
+            ("login", n24_obf(login), None),
+            ("pass", n24_obf(password), None),
+            ("userId", str(user_id), None),
+            ("transid", n24_obf(str(trans_id)), None),
+            ("info", info, "utf-8"),
+            ("progress", n24_obf(str(progress)), None),
+        ]
+        return self._multipart_prg(fields, endpoint="SetTrans.php")
+
+    def get_imdb(self) -> str:
+        """GetIMDB.php — lista premier/IMDb klienta (PostAction=GET)."""
+        return self._multipart_prg([("PostAction", "GET", None)],
+                                   endpoint="GetIMDB.php")
 
     def search(self, imdb: str = "", title: str = "") -> List[SubtitleHit]:
         """webapi.php — wyszukiwanie po IMDB lub tytule (XML, bez obf)."""
@@ -2010,6 +2097,97 @@ class Napisy24Client:
         ok = "Napisy usunięte" in page
         return UploadResult("napisy24", ok,
                             "Usunięto" if ok else "Nie potwierdzono usunięcia", page[:300])
+
+    def _web_get(self, opener, url: str) -> str:
+        r = opener.open(urllib.request.Request(
+            url, headers={"User-Agent": self.WEB_UA}), timeout=self.timeout)
+        return r.read().decode("utf-8", errors="replace")
+
+    def web_edit_fields(self, opener, napis_id: str) -> List[Tuple[str, str]]:
+        """Zescrapuj bieżące pola formularza edycji (?edytuj=<id>)."""
+        page = self._web_get(opener, f"https://{self.HOST}/dodaj-napisy?edytuj={napis_id}")
+        return _n24_scrape_form(page)
+
+    def web_edit(self, opener, napis_id: str, overrides=None,
+                 srt_bytes=None, srt_name=None) -> Tuple[bool, str]:
+        """Edytuj istniejący wpis przez /dodaj-napisy?edytuj=<id>: ponownie
+        wyślij wstępnie wypełniony formularz z nadpisaniami (`overrides`) i
+        opcjonalnym plikiem `.srt`. Zwraca (ok, szczegóły)."""
+        url = f"https://{self.HOST}/dodaj-napisy?edytuj={napis_id}"
+        fields = _n24_scrape_form(self._web_get(opener, url))
+        if overrides:
+            wanted = {_n24_form_short(k): v for k, v in overrides.items()}
+            seen = set()
+            for i, (name, _v) in enumerate(fields):
+                short = _n24_form_short(name)
+                if short in wanted:
+                    fields[i] = (name, wanted[short])
+                    seen.add(short)
+            for short, val in wanted.items():
+                if short not in seen:
+                    fields.append(("form[%s]" % short, val))
+        if srt_bytes is not None:
+            fields.append(("form[form_dodajNapis1_plik]",
+                           (srt_name or "napisy.srt",
+                            normalize_for_napisy24(decode_text(srt_bytes)), "text/plain")))
+        body, ctype = build_multipart(fields)
+        req = urllib.request.Request(url, data=body, headers={
+            "User-Agent": self.WEB_UA, "Content-Type": ctype,
+            "Referer": url, "Origin": f"https://{self.HOST}"})
+        out = opener.open(req, timeout=self.timeout).read().decode("utf-8", errors="replace")
+        if "Dodane" in out and ("dziękujemy" in out or "dziekujemy" in out):
+            return True, url
+        errs = re.findall(r'class="[^"]*formError[^"]*"[^>]*>([^<]+)', out)
+        uniq = list(dict.fromkeys(e.strip() for e in errs if e.strip()))
+        return False, ("; ".join(uniq) or "nieznany błąd")
+
+
+def _n24_form_short(name: str) -> str:
+    """'form[form_dodaj_fps][]' -> 'form_dodaj_fps' (zwykłe nazwy bez zmian)."""
+    s = name
+    if s.startswith("form[") and s.endswith("]"):
+        s = s[5:-1]
+    return s.replace("][", "").rstrip("[]")
+
+
+def _n24_scrape_form(page: str) -> List[Tuple[str, str]]:
+    """Odczytaj formularz RSForm (#userForm) jako uporządkowaną listę (name, value)
+    — dokładnie to, co przeglądarka wysłałaby ponownie (zaznaczone opcje/radia/
+    checkboxy)."""
+    m = re.search(r'<form[^>]*id="userForm".*?</form>', page, re.S)
+    if not m:
+        raise AqError("nie znaleziono formularza edycji (nie Twój napis?)")
+    form = m.group(0)
+    out: List[Tuple[str, str]] = []
+    radios = set()
+    for tag in re.finditer(r"<(input|select|textarea)\b(.*?)(?:/?>)", form, re.S):
+        kind, attrs = tag.group(1), tag.group(2)
+        nm = re.search(r'name="([^"]*)"', attrs)
+        if not nm:
+            continue
+        nm = nm.group(1)
+        typ = (re.search(r'type="([^"]*)"', attrs) or [None, ""])[1] if kind == "input" else kind
+        if kind == "select":
+            tail = form[tag.end():]
+            block = tail[:tail.find("</select>")] if "</select>" in tail else ""
+            sel = (re.search(r'<option[^>]*selected[^>]*value="([^"]*)"', block)
+                   or re.search(r'<option[^>]*value="([^"]*)"[^>]*selected', block))
+            out.append((nm, sel.group(1) if sel else ""))
+            continue
+        if typ == "file":
+            continue
+        if typ == "radio":
+            if "checked" in attrs and nm not in radios:
+                radios.add(nm)
+                out.append((nm, (re.search(r'value="([^"]*)"', attrs) or [None, ""])[1]))
+            continue
+        if typ == "checkbox":
+            if "checked" in attrs:
+                out.append((nm, (re.search(r'value="([^"]*)"', attrs) or [None, ""])[1]))
+            continue
+        val = re.search(r'value="([^"]*)"', attrs)
+        out.append((nm, html.unescape(val.group(1)) if val else ""))
+    return out
 
 
 def _norm_imdb(imdb_id: str) -> str:
@@ -3495,6 +3673,82 @@ def cmd_n24(args, cfg):
         r = client.web_delete(opener, args.id)
         print(f"[{'OK' if r.ok else 'BŁĄD'}] {r.message}")
         return 0 if r.ok else 1
+    if args.n24_cmd in ("mediainfo", "changedata"):
+        login, password = cfg.n24_login(args.n24_user), cfg.n24_pass(args.n24_pass)
+        if not login or not password:
+            raise AuthError("napisy24 mediainfo wymaga loginu i hasła")
+        record_id = args.id or ""
+        if not record_id:
+            record_id = client.checksub_lp(args.movie, lang=args.lang)
+            if not record_id:
+                print("Brak id `lp` dla tego filmu (CheckSub2 nic nie znalazł) — podaj --id",
+                      file=sys.stderr)
+                return 2
+            print(f"Rozpoznano id rekordu (lp): {record_id}")
+        resp = client.change_data(login, password, record_id, args.movie,
+                                  duration=args.duration or "", resolution=args.resolution or "",
+                                  fps=(("%g" % args.fps) if args.fps else ""), lang=args.lang)
+        print(f"Serwer: {resp}")
+        return 0 if resp.startswith("data=ok") else 2
+    if args.n24_cmd == "notify":
+        login, password = cfg.n24_login(args.n24_user), cfg.n24_pass(args.n24_pass)
+        if not login or not password:
+            raise AuthError("napisy24 notify wymaga loginu i hasła")
+        resp = client.notify(login, password, args.movie, enable=not args.off,
+                             sms_code=args.sms_code, lang=args.lang)
+        print(f"Serwer: {resp}")
+        return 0 if resp.startswith("data=ok") else 2
+    if args.n24_cmd == "trans":
+        if args.set is not None:
+            login, password = cfg.n24_login(args.n24_user), cfg.n24_pass(args.n24_pass)
+            if not login or not password:
+                raise AuthError("napisy24 trans --set wymaga loginu i hasła")
+            resp = client.set_trans(login, password, args.user_id, args.set,
+                                   info=args.info or "", progress=args.progress or "")
+            print(f"Serwer: {resp}")
+            return 0 if resp.startswith("data=ok") else 2
+        rows = client.get_trans(args.user_id)
+        if not rows:
+            print(f"Brak projektów tłumaczeń dla userId={args.user_id}.")
+            return 0
+        print(f"Projekty tłumaczeń ({len(rows)}):")
+        for r in rows:
+            print("  " + " | ".join(r))
+        return 0
+    if args.n24_cmd in ("premieres", "getimdb"):
+        out = client.get_imdb()
+        print(out if out else "(pusta odpowiedź)")
+        return 0
+    if args.n24_cmd == "edit":
+        login, password = cfg.n24_login(args.n24_user), cfg.n24_pass(args.n24_pass)
+        if not login or not password:
+            raise AuthError("napisy24 edit wymaga loginu i hasła")
+        overrides = {}
+        for item in (args.set or []):
+            if "=" not in item:
+                print(f"Błąd: --set oczekuje pole=wartość (dostałem {item!r})", file=sys.stderr)
+                return 1
+            k, v = item.split("=", 1)
+            overrides[k.strip()] = v
+        srt = read_input_bytes(args.srt) if args.srt else None
+        opener = client._web_opener()
+        if not client.web_login(opener, login, password):
+            raise AuthError("napisy24: logowanie nieudane")
+        if args.show:
+            for name, value in client.web_edit_fields(opener, args.napis_id):
+                print("  %-34s = %s" % (_n24_form_short(name), value))
+            return 0
+        if not overrides and srt is None:
+            print("Nic do zmiany — podaj --set pole=wartość i/lub --srt (użyj --show, by wypisać pola)",
+                  file=sys.stderr)
+            return 1
+        srt_name = (os.path.basename(args.srt) if args.srt else None)
+        ok, detail = client.web_edit(opener, args.napis_id, overrides, srt, srt_name)
+        if ok:
+            print(f"Zaktualizowano napis {args.napis_id}. ({detail})")
+            return 0
+        print(f"Edycja nieudana: {detail}", file=sys.stderr)
+        return 2
     return 2
 
 
@@ -3776,6 +4030,33 @@ def build_parser() -> argparse.ArgumentParser:
     xa.add_argument("--check-only", action="store_true", dest="check_only",
                     help="tylko faza Check (read-only) — nic nie wysyła")
     add_creds(xa)
+    xmi = ns.add_parser("mediainfo", aliases=["changedata"],
+                        help="powiąż hash filmu + media info z rekordem napisów (ChangeData.php)")
+    xmi.add_argument("--movie", required=True, help="plik filmowy (lub URL) do powiązania")
+    xmi.add_argument("--id", default="", help="id rekordu `lp` z CheckSub2 (auto, gdy pominięte)")
+    xmi.add_argument("--duration", default=""); xmi.add_argument("--resolution", default="")
+    xmi.add_argument("--fps", type=float); xmi.add_argument("--lang", default="pl")
+    add_creds(xmi)
+    xnt = ns.add_parser("notify", help="poproś serwis o powiadomienie, gdy pojawią się napisy do filmu")
+    xnt.add_argument("--movie", required=True, help="plik filmowy (lub URL) do obserwowania")
+    xnt.add_argument("--off", action="store_true", help="wyłącz powiadomienie")
+    xnt.add_argument("--sms-code", dest="sms_code", default=None,
+                     help="powiadomienie SMS z tym kodem (domyślnie e-mail)")
+    xnt.add_argument("--lang", default="pl"); add_creds(xnt)
+    xtr = ns.add_parser("trans", help="lista / aktualizacja projektów tłumaczeń (Get/SetTrans.php)")
+    xtr.add_argument("user_id", help="numeryczne id konta (z `login`)")
+    xtr.add_argument("--set", metavar="TRANSID", default=None, help="aktualizuj ten projekt zamiast listować")
+    xtr.add_argument("--info", default=""); xtr.add_argument("--progress", default="")
+    add_creds(xtr)
+    xpr = ns.add_parser("premieres", aliases=["getimdb"], help="lista premier/IMDb klienta (GetIMDB.php)")
+    add_creds(xpr)
+    xed = ns.add_parser("edit", help="edytuj własny wpis WWW (?edytuj=)")
+    xed.add_argument("napis_id", help="numeryczne id napisu")
+    xed.add_argument("--show", action="store_true", help="tylko wypisz bieżące wartości pól")
+    xed.add_argument("--set", action="append", metavar="POLE=WARTOŚĆ",
+                     help="zmień pole (powtarzalne), np. --set form_dodaj_wydanie=nowe.wyd")
+    xed.add_argument("--srt", help="podmień też plik napisów")
+    add_creds(xed)
     n.set_defaults(func=cmd_n24)
 
     # ---- per-serwis: napiprojekt ----

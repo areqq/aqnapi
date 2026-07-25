@@ -24,7 +24,7 @@
 #include <sys/ioctl.h>
 #include "third_party/zlib/zlib.h"
 
-#define VERSION "1.0.11"
+#define VERSION "1.0.12"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
@@ -403,6 +403,34 @@ static void lines_free(Lines*L){ for(int i=0;i<L->n;i++) free(L->a[i]); free(L->
 static int is_ascii_ws(char c){ return c==' '||c=='\t'||c=='\r'||c=='\n'||c=='\f'||c=='\v'; }
 static void strip_inplace(char*s){ size_t n=strlen(s),i=0; while(n>0&&is_ascii_ws(s[n-1])) s[--n]=0;
     while(s[i]&&is_ascii_ws(s[i])) i++; if(i) memmove(s,s+i,n-i+1); }
+
+/* Dekoduj bajty jako UTF-8 z errors="replace" (jak CPython: substytucja
+ * maksymalnych podciągów niepoprawnych sekwencji przez U+FFFD). Wejście/wyjście
+ * NUL-zakończone; zwraca nowy bufor (malloc). */
+static char* utf8_replace(const char*in){
+    const unsigned char*p=(const unsigned char*)in; size_t n=strlen(in);
+    SB o; sb_init(&o); size_t i=0;
+    while(i<n){ unsigned char b=p[i];
+        if(b<0x80){ sb_putc(&o,(char)b); i++; continue; }
+        int need=0; unsigned lo1=0x80,hi1=0xBF;
+        if(b>=0xC2&&b<=0xDF){ need=1; }
+        else if(b==0xE0){ need=2; lo1=0xA0; }
+        else if(b>=0xE1&&b<=0xEC){ need=2; }
+        else if(b==0xED){ need=2; hi1=0x9F; }
+        else if(b>=0xEE&&b<=0xEF){ need=2; }
+        else if(b==0xF0){ need=3; lo1=0x90; }
+        else if(b>=0xF1&&b<=0xF3){ need=3; }
+        else if(b==0xF4){ need=3; hi1=0x8F; }
+        else { sb_puts(&o,"\xEF\xBF\xBD"); i++; continue; }  /* zły bajt wiodący */
+        size_t consumed=1; int ok=1;
+        for(int k=0;k<need;k++){ unsigned lo=(k==0)?lo1:0x80, hi=(k==0)?hi1:0xBF;
+            if(i+consumed<n && p[i+consumed]>=lo && p[i+consumed]<=hi) consumed++;
+            else { ok=0; break; } }
+        if(ok){ for(size_t k=0;k<consumed;k++) sb_putc(&o,(char)p[i+k]); i+=consumed; }
+        else { sb_puts(&o,"\xEF\xBF\xBD"); i+=consumed; }  /* consumed>=1 */
+    }
+    sb_putc(&o,0); return o.b;
+}
 
 /* usuń tagi HTML (</?[A-Za-z][^>]*>) i klamry {...} — jak strip_format_tags */
 static void strip_format_tags(char*s){
@@ -1746,6 +1774,83 @@ static int cmd_n24_delete(const char*cfgpath,const char*id,const char*reason){
     int ok = resp && strstr(resp,"Napisy usunięte"); free(resp);
     printf("[%s] %s\n", ok?"OK":"BŁĄD", ok?"usunięto":"nie potwierdzono usunięcia"); return ok?0:1;
 }
+/* --- edycja wpisu WWW (/dodaj-napisy?edytuj=<id>) --- */
+typedef struct { char name[96]; char value[2048]; } FField;
+static void n24_form_short(const char*name,char*out,size_t osz){
+    size_t len=strlen(name);
+    if(len>=6 && !strncmp(name,"form[",5) && name[len-1]==']'){
+        char tmp[160]; size_t k=0; for(size_t i=5;i<len-1 && k<sizeof tmp-1;i++) tmp[k++]=name[i]; tmp[k]=0;
+        char t2[160]; size_t o=0; for(size_t i=0;tmp[i];){ if(tmp[i]==']'&&tmp[i+1]=='['){ i+=2; continue; } t2[o++]=tmp[i++]; } t2[o]=0;
+        while(o>0 && (t2[o-1]=='['||t2[o-1]==']')) t2[--o]=0;
+        snprintf(out,osz,"%s",t2); return; }
+    snprintf(out,osz,"%s",name);
+}
+static void attr_val(const char*attrs,const char*key,char*out,size_t osz){ out[0]=0;
+    char pat[24]; snprintf(pat,sizeof pat,"%s=\"",key); const char*p=strstr(attrs,pat); if(!p){return;} p+=strlen(pat);
+    size_t k=0; while(*p&&*p!='"'&&k<osz-1) out[k++]=*p++; out[k]=0; }
+/* zescrapuj #userForm jako listę (name,value) — jak web_scrape_form. -1 gdy brak formularza. */
+static int n24_scrape_form(const char*page,FField*ff,int max,int*count){ *count=0;
+    const char*uf=strstr(page,"id=\"userForm\""); if(!uf) return -1;
+    const char*fs=strchr(uf,'>'); if(!fs) return -1; fs++;
+    const char*fe=strstr(fs,"</form>"); if(!fe) fe=page+strlen(page);
+    char radios[48][96]; int nrad=0; const char*p=fs;
+    while(p<fe && *count<max){
+        const char*ti=strstr(p,"<input"),*ts=strstr(p,"<select"),*tt=strstr(p,"<textarea");
+        const char*best=NULL; int kind=0;
+        if(ti&&ti<fe&&(!best||ti<best)){best=ti;kind=1;} if(ts&&ts<fe&&(!best||ts<best)){best=ts;kind=2;} if(tt&&tt<fe&&(!best||tt<best)){best=tt;kind=3;}
+        if(!best) break; const char*gt=strchr(best,'>'); if(!gt||gt>fe) break;
+        char attrs[2048]; size_t al=(size_t)(gt-best); if(al>=sizeof attrs)al=sizeof attrs-1; memcpy(attrs,best,al); attrs[al]=0;
+        char name[96]; attr_val(attrs,"name",name,sizeof name);
+        if(!name[0]){ p=gt+1; continue; }
+        char typ[24]=""; if(kind==1) attr_val(attrs,"type",typ,sizeof typ); else if(kind==2) strcpy(typ,"select"); else strcpy(typ,"textarea");
+        if(kind==2){ const char*be=strstr(gt,"</select>"); if(!be)be=fe; char val[2048]="";
+            for(const char*o2=strstr(gt,"<option"); o2&&o2<be; o2=strstr(o2+1,"<option")){ const char*oe=strchr(o2,'>'); if(!oe)break;
+                char oa[600]; size_t ol=(size_t)(oe-o2); if(ol>=sizeof oa)ol=sizeof oa-1; memcpy(oa,o2,ol); oa[ol]=0;
+                if(strstr(oa,"selected")){ attr_val(oa,"value",val,sizeof val); break; } }
+            snprintf(ff[*count].name,96,"%s",name); snprintf(ff[*count].value,2048,"%s",val); (*count)++; p=(be<fe?be:gt)+1; continue; }
+        if(!strcmp(typ,"file")){ p=gt+1; continue; }
+        if(!strcmp(typ,"radio")){ if(strstr(attrs,"checked")){ int seen=0; for(int r=0;r<nrad;r++) if(!strcmp(radios[r],name))seen=1;
+            if(!seen){ if(nrad<48) snprintf(radios[nrad++],96,"%s",name); char val[2048]; attr_val(attrs,"value",val,sizeof val);
+                snprintf(ff[*count].name,96,"%s",name); snprintf(ff[*count].value,2048,"%s",val); (*count)++; } } p=gt+1; continue; }
+        if(!strcmp(typ,"checkbox")){ if(strstr(attrs,"checked")){ char val[2048]; attr_val(attrs,"value",val,sizeof val);
+            snprintf(ff[*count].name,96,"%s",name); snprintf(ff[*count].value,2048,"%s",val); (*count)++; } p=gt+1; continue; }
+        { char val[2048]; attr_val(attrs,"value",val,sizeof val); html_unescape(val);
+          snprintf(ff[*count].name,96,"%s",name); snprintf(ff[*count].value,2048,"%s",val); (*count)++; }
+        p=gt+1;
+    }
+    return 0;
+}
+static int cmd_n24_edit(const char*cfgpath,const char*napis_id,int show,const char**sets,int nsets,const char*srt){
+    if(!napis_id){ fprintf(stderr,"napisy24 edit wymaga id napisu\n"); return 2; }
+    if(!n24_web_login(cfgpath)){ fprintf(stderr,"Błąd uwierzytelnienia: napisy24: logowanie nieudane\n"); return 2; }
+    char path[128]; snprintf(path,sizeof path,"/dodaj-napisy?edytuj=%s",napis_id);
+    int st; size_t n; char*page=https_fetch("GET","napisy24.pl",path,NULL,NULL,&st,&n,0);
+    if(!page){ fprintf(stderr,"napisy24: błąd połączenia\n"); return 1; }
+    FField*ff=xmalloc(sizeof(FField)*128); int cnt=0;
+    if(n24_scrape_form(page,ff,128,&cnt)!=0){ fprintf(stderr,"Błąd: nie znaleziono formularza edycji (nie Twój napis?)\n"); free(ff); free(page); return 1; }
+    free(page);
+    if(show){ for(int i=0;i<cnt;i++){ char sh[128]; n24_form_short(ff[i].name,sh,sizeof sh); printf("  %-34s = %s\n",sh,ff[i].value); } free(ff); return 0; }
+    if(nsets==0 && !srt){ fprintf(stderr,"Nic do zmiany — podaj --set pole=wartość i/lub --srt (użyj --show, by wypisać pola)\n"); free(ff); return 1; }
+    /* nadpisania */
+    for(int s=0;s<nsets;s++){ const char*eq=strchr(sets[s],'='); if(!eq){ fprintf(stderr,"Błąd: --set oczekuje pole=wartość (dostałem '%s')\n",sets[s]); free(ff); return 1; }
+        char key[96]; size_t kl=(size_t)(eq-sets[s]); if(kl>=sizeof key)kl=sizeof key-1; memcpy(key,sets[s],kl); key[kl]=0;
+        char*ks=key; while(*ks==' ')ks++; { size_t e=strlen(ks); while(e>0&&ks[e-1]==' ')ks[--e]=0; }
+        char sh[128]; n24_form_short(ks,sh,sizeof sh); const char*val=eq+1; int found=0;
+        for(int i=0;i<cnt;i++){ char sh2[128]; n24_form_short(ff[i].name,sh2,sizeof sh2); if(!strcmp(sh2,sh)){ snprintf(ff[i].value,2048,"%s",val); found=1; } }
+        if(!found && cnt<128){ snprintf(ff[cnt].name,96,"form[%s]",sh); snprintf(ff[cnt].value,2048,"%s",val); cnt++; } }
+    /* multipart */
+    const char*bnd="----aqnapin24edit"; SB b; sb_init(&b);
+    for(int i=0;i<cnt;i++){ sb_puts(&b,"--");sb_puts(&b,bnd);sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"");sb_puts(&b,ff[i].name);sb_puts(&b,"\"\r\n\r\n");sb_puts(&b,ff[i].value);sb_puts(&b,"\r\n"); }
+    if(srt){ size_t rn; char*raw=read_input(srt,&rn); if(raw){ char*text=decode_text((unsigned char*)raw,rn); free(raw); size_t fl; unsigned char*fb=n24_normalize_crlf(text,&fl); free(text);
+        char fn[512]; input_basename(srt,fn,sizeof fn);
+        sb_puts(&b,"--");sb_puts(&b,bnd);sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"form[form_dodajNapis1_plik]\"; filename=\"");sb_puts(&b,fn);sb_puts(&b,"\"\r\nContent-Type: text/plain\r\n\r\n");sb_putn(&b,(char*)fb,fl);sb_puts(&b,"\r\n"); free(fb); } }
+    sb_puts(&b,"--");sb_puts(&b,bnd);sb_puts(&b,"--\r\n"); free(ff);
+    char extra[256]; snprintf(extra,sizeof extra,"Content-Type: multipart/form-data; boundary=%s\r\nReferer: https://napisy24.pl%s\r\nOrigin: https://napisy24.pl\r\n",bnd,path);
+    char*resp=https_fetch("POST","napisy24.pl",path,extra,b.b,&st,&n,0); free(b.b);
+    int ok = resp && strstr(resp,"Dodane") && (strstr(resp,"dziękujemy")||strstr(resp,"dziekujemy"));
+    if(ok){ printf("Zaktualizowano napis %s. (https://napisy24.pl%s)\n",napis_id,path); free(resp); return 0; }
+    fprintf(stderr,"Edycja nieudana: %s\n", resp?"serwer nie potwierdził":"brak odpowiedzi"); free(resp); return 2;
+}
 #endif /* AQNAPI_TLS */
 
 /* Agregujący upload (multi-serwis) — jak Python cmd_upload. Domyślny serwis: np.
@@ -1901,11 +2006,13 @@ static void prg_field(SB*b,const char*bnd,const char*name,const char*value,const
     if(charset){ sb_puts(b,"Content-Type: text/plain; charset="); sb_puts(b,charset); sb_puts(b,"\r\n"); }
     sb_puts(b,"Content-Transfer-Encoding: 8bit\r\n\r\n"); sb_puts(b,value); sb_puts(b,"\r\n"); }
 #define PRG_OBF(b,bnd,name,val) do{ char*_o=n24_obf(val); prg_field(b,bnd,name,_o,NULL); free(_o); }while(0)
-static char* n24_prg_post(const char*body,size_t blen,const char*boundary){
+static char* n24_prg_post_ep(const char*endpoint,const char*body,size_t blen,const char*boundary){
     SB req; sb_init(&req); char hdr[400];
-    snprintf(hdr,sizeof hdr,"POST /run/AddSubPrg.php HTTP/1.0\r\nHost: napisy24.pl\r\nUser-Agent: Mozilla/4.0\r\nAccept: */*\r\nContent-Type: multipart/form-data; boundary=%s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",boundary,blen);
+    snprintf(hdr,sizeof hdr,"POST /run/%s HTTP/1.0\r\nHost: napisy24.pl\r\nUser-Agent: Mozilla/4.0\r\nAccept: */*\r\nContent-Type: multipart/form-data; boundary=%s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",endpoint,boundary,blen);
     sb_puts(&req,hdr); sb_putn(&req,body,blen);
-    size_t bl; char*resp=http_request("napisy24.pl",req.b,req.len,&bl); free(req.b); return resp; }
+    size_t bl; char*resp=http_request("napisy24.pl",req.b,req.len,&bl); free(req.b);
+    if(!resp) return NULL; char*dec=utf8_replace(resp); free(resp); return dec; }
+static char* n24_prg_post(const char*body,size_t blen,const char*boundary){ return n24_prg_post_ep("AddSubPrg.php",body,blen,boundary); }
 static const char* skip_ws(const char*s){ while(*s==' '||*s=='\r'||*s=='\n'||*s=='\t')s++; return s; }
 static int cmd_n24_attach(const char*cfgpath,const char*movie,const char*srt,const char*imdb,
                           const char*duration,const char*resolution,const char*fpsflag,int check_only){
@@ -1974,7 +2081,8 @@ static char* n24_mrun_post(const char*endpoint,SB*body){
     sb_puts(body,"--" N24_MRUN_BND "--");
     char hdr[400]; snprintf(hdr,sizeof hdr,"POST /run/%s HTTP/1.0\r\nHost: napisy24.pl\r\nUser-Agent: Mozilla/4.0\r\nAccept: */*\r\nContent-Type: multipart/form-data; boundary=" N24_MRUN_BND "\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",endpoint,body->len);
     SB req; sb_init(&req); sb_puts(&req,hdr); sb_putn(&req,body->b,body->len);
-    size_t bl; char*resp=http_request("napisy24.pl",req.b,req.len,&bl); free(req.b); return resp; }
+    size_t bl; char*resp=http_request("napisy24.pl",req.b,req.len,&bl); free(req.b);
+    if(!resp) return NULL; char*dec=utf8_replace(resp); free(resp); return dec; }
 /* napisy24 login klienta: CheckLogin.php (pola login/pass zaciemniane) */
 static int cmd_n24_login(const char*cfgpath){
     Ini ini; ini_load(config_path(cfgpath),&ini);
@@ -1996,6 +2104,112 @@ static int cmd_n24_imdb(const char*imdb){
     char*resp=n24_mrun_post("CheckIMDB.php",&b); free(b.b);
     if(!resp) die("napisy24: błąd połączenia");
     strip_inplace(resp); printf("%s\n",resp); free(resp); return 0;
+}
+/* creds napisy24: config [napisy24] login/pass + env NAPI24_LOGIN/NAPI24_PASS */
+static void n24_creds(const char*cfgpath,char*login,size_t ls,char*pw,size_t ps){
+    Ini ini; ini_load(config_path(cfgpath),&ini);
+    snprintf(login,ls,"%s",ini_get(&ini,0,"login")); snprintf(pw,ps,"%s",ini_get(&ini,0,"pass"));
+    const char*eu=getenv("NAPI24_LOGIN"),*ep=getenv("NAPI24_PASS"); if(eu&&*eu)snprintf(login,ls,"%s",eu); if(ep&&*ep)snprintf(pw,ps,"%s",ep);
+}
+/* CheckSub2.php -> id rekordu `lp` z nagłówka odpowiedzi (dla mediainfo). Zwraca 1 gdy znaleziono. */
+static int n24_checksub_lp(const char*movie,const char*lang,char*out,size_t osz){ out[0]=0;
+    char osh[17]; if(oshash(movie,osh)!=0) return 0; for(char*p=osh;*p;p++)*p=toupper((unsigned char)*p);
+    char md[33]; if(md5_10mb(movie,md)!=0) return 0;
+    char fs[32]; snprintf(fs,sizeof fs,"%ld",input_size(movie));
+    char fn[512]; input_basename(movie,fn,sizeof fn);
+    SB b; sb_init(&b); char*o;
+    mrun_field(&b,"postAction","CheckSub"); mrun_field(&b,"postVer","v1.99.1");
+    o=n24_obf(osh); mrun_field(&b,"fh",o); free(o); o=n24_obf(md); mrun_field(&b,"md",o); free(o);
+    o=n24_obf(fs); mrun_field(&b,"fs",o); free(o); o=n24_obf(fn); mrun_field(&b,"fn",o); free(o);
+    o=n24_obf(lang); mrun_field(&b,"nl",o); free(o); mrun_field(&b,"n24pref","1"); mrun_field(&b,"licz","1");
+    char*resp=n24_mrun_post("CheckSub2.php",&b); free(b.b); if(!resp) return 0;
+    char*sep=strstr(resp,"||"); if(sep)*sep=0; /* tylko nagłówek */
+    for(char*tok=strtok(resp,"|");tok;tok=strtok(NULL,"|")){ if(!strncmp(tok,"lp:",3)){ snprintf(out,osz,"%s",tok+3); break; } }
+    free(resp); return out[0]?1:0;
+}
+/* mediainfo: ChangeData.php — powiąż hash+media info z rekordem lp */
+static int cmd_n24_mediainfo(const char*cfgpath,const char*movie,const char*id,const char*duration,const char*resolution,const char*fpsflag,const char*lang){
+    if(!movie){ fprintf(stderr,"napisy24 mediainfo wymaga --movie\n"); return 2; }
+    char login[128],pw[128]; n24_creds(cfgpath,login,sizeof login,pw,sizeof pw);
+    if(!login[0]||!pw[0]){ fprintf(stderr,"Błąd uwierzytelnienia: napisy24 mediainfo wymaga loginu i hasła\n"); return 2; }
+    const char*L=lang&&lang[0]?lang:"pl";
+    char recid[64]="";
+    if(id&&id[0]) snprintf(recid,sizeof recid,"%s",id);
+    else { char lp[64]; if(!n24_checksub_lp(movie,L,lp,sizeof lp)){ fprintf(stderr,"Brak id `lp` dla tego filmu (CheckSub2 nic nie znalazł) — podaj --id\n"); return 2; }
+        snprintf(recid,sizeof recid,"%s",lp); printf("Rozpoznano id rekordu (lp): %s\n",recid); }
+    char osh[17]; if(oshash(movie,osh)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); return 1; } for(char*p=osh;*p;p++)*p=toupper((unsigned char)*p);
+    char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); return 1; }
+    char fs[32]; snprintf(fs,sizeof fs,"%ld",input_size(movie)); char fn[512]; input_basename(movie,fn,sizeof fn);
+    char fpsbuf[32]=""; if(fpsflag&&fpsflag[0]) snprintf(fpsbuf,sizeof fpsbuf,"%s",fpsflag); else { double f=fps_from_file(movie); if(f>0) snprintf(fpsbuf,sizeof fpsbuf,"%.3f",f); }
+    char data[256]; snprintf(data,sizeof data,"%s|%s|%s|%s",recid,duration?duration:"",resolution?resolution:"",fpsbuf);
+    const char*bnd="----aqnapiprg000001"; SB b; sb_init(&b);
+    PRG_OBF(&b,bnd,"type","mediainfo"); prg_field(&b,bnd,"postVer","v1.99.1",NULL);
+    PRG_OBF(&b,bnd,"login",login); PRG_OBF(&b,bnd,"pass",pw); PRG_OBF(&b,bnd,"data",data);
+    PRG_OBF(&b,bnd,"fh",osh); PRG_OBF(&b,bnd,"md",md); PRG_OBF(&b,bnd,"fs",fs); PRG_OBF(&b,bnd,"fn",fn);
+    prg_field(&b,bnd,"n24pref","1",NULL); PRG_OBF(&b,bnd,"nl",L);
+    sb_puts(&b,"--"); sb_puts(&b,bnd); sb_puts(&b,"--\r\n");
+    char*resp=n24_prg_post_ep("ChangeData.php",b.b,b.len,bnd); free(b.b);
+    if(!resp) die("napisy24: błąd połączenia"); strip_inplace(resp);
+    printf("Serwer: %s\n",resp); int ok=!strncmp(resp,"data=ok",7); free(resp); return ok?0:2;
+}
+/* notify: Notifiemail.php / NotifiSMS.php — powiadomienie o napisach */
+static int cmd_n24_notify(const char*cfgpath,const char*movie,int off,const char*sms_code,const char*lang){
+    if(!movie){ fprintf(stderr,"napisy24 notify wymaga --movie\n"); return 2; }
+    char login[128],pw[128]; n24_creds(cfgpath,login,sizeof login,pw,sizeof pw);
+    if(!login[0]||!pw[0]){ fprintf(stderr,"Błąd uwierzytelnienia: napisy24 notify wymaga loginu i hasła\n"); return 2; }
+    const char*L=lang&&lang[0]?lang:"pl";
+    char osh[17]; if(oshash(movie,osh)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); return 1; } for(char*p=osh;*p;p++)*p=toupper((unsigned char)*p);
+    char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); return 1; }
+    char fs[32]; snprintf(fs,sizeof fs,"%ld",input_size(movie));
+    const char*bnd="----aqnapiprg000001"; SB b; sb_init(&b);
+    prg_field(&b,bnd,"postAction","SetNotifi",NULL); prg_field(&b,bnd,"postVer","v1.99.1",NULL);
+    PRG_OBF(&b,bnd,"login",login); PRG_OBF(&b,bnd,"pass",pw); PRG_OBF(&b,bnd,"data",off?"0":"1");
+    if(sms_code){ PRG_OBF(&b,bnd,"code",sms_code); }
+    PRG_OBF(&b,bnd,"fh",osh); PRG_OBF(&b,bnd,"md",md); PRG_OBF(&b,bnd,"fs",fs); PRG_OBF(&b,bnd,"nl",L);
+    sb_puts(&b,"--"); sb_puts(&b,bnd); sb_puts(&b,"--\r\n");
+    char*resp=n24_prg_post_ep(sms_code?"NotifiSMS.php":"Notifiemail.php",b.b,b.len,bnd); free(b.b);
+    if(!resp) die("napisy24: błąd połączenia"); strip_inplace(resp);
+    printf("Serwer: %s\n",resp); int ok=!strncmp(resp,"data=ok",7); free(resp); return ok?0:2;
+}
+/* trans: GetTrans.php (lista) / SetTrans.php (--set) */
+static int cmd_n24_trans(const char*cfgpath,const char*user_id,const char*set_id,const char*info,const char*progress){
+    const char*bnd="----aqnapiprg000001";
+    if(set_id){
+        char login[128],pw[128]; n24_creds(cfgpath,login,sizeof login,pw,sizeof pw);
+        if(!login[0]||!pw[0]){ fprintf(stderr,"Błąd uwierzytelnienia: napisy24 trans --set wymaga loginu i hasła\n"); return 2; }
+        SB b; sb_init(&b);
+        PRG_OBF(&b,bnd,"type","mediainfo"); prg_field(&b,bnd,"postVer","v1.99.1",NULL);
+        PRG_OBF(&b,bnd,"login",login); PRG_OBF(&b,bnd,"pass",pw);
+        prg_field(&b,bnd,"userId",user_id?user_id:"",NULL); PRG_OBF(&b,bnd,"transid",set_id);
+        prg_field(&b,bnd,"info",info?info:"","utf-8"); PRG_OBF(&b,bnd,"progress",progress?progress:"");
+        sb_puts(&b,"--"); sb_puts(&b,bnd); sb_puts(&b,"--\r\n");
+        char*resp=n24_prg_post_ep("SetTrans.php",b.b,b.len,bnd); free(b.b);
+        if(!resp) die("napisy24: błąd połączenia"); strip_inplace(resp);
+        printf("Serwer: %s\n",resp); int ok=!strncmp(resp,"data=ok",7); free(resp); return ok?0:2;
+    }
+    SB b; sb_init(&b);
+    prg_field(&b,bnd,"PostAction","GET",NULL); prg_field(&b,bnd,"userId",user_id?user_id:"",NULL);
+    sb_puts(&b,"--"); sb_puts(&b,bnd); sb_puts(&b,"--\r\n");
+    char*resp=n24_prg_post_ep("GetTrans.php",b.b,b.len,bnd); free(b.b);
+    if(!resp) die("napisy24: błąd połączenia"); strip_inplace(resp);
+    /* rekordy '~', pola '^' (strtok_r — dwa poziomy) */
+    int cnt=0; { char*tmp=strdup(resp),*sv=NULL; for(char*r=strtok_r(tmp,"~",&sv);r;r=strtok_r(NULL,"~",&sv)){ char*s=r; while(*s==' '||*s=='\r'||*s=='\n'||*s=='\t')s++; if(*s)cnt++; } free(tmp); }
+    if(cnt==0){ printf("Brak projektów tłumaczeń dla userId=%s.\n",user_id?user_id:""); free(resp); return 0; }
+    printf("Projekty tłumaczeń (%d):\n",cnt);
+    char*sv1=NULL;
+    for(char*r=strtok_r(resp,"~",&sv1);r;r=strtok_r(NULL,"~",&sv1)){ char*s=r; while(*s==' '||*s=='\r'||*s=='\n'||*s=='\t')s++; if(!*s) continue;
+        SB line; sb_init(&line); int first=1; char*sv2=NULL; for(char*f=strtok_r(s,"^",&sv2);f;f=strtok_r(NULL,"^",&sv2)){ if(!first) sb_puts(&line," | "); sb_puts(&line,f); first=0; }
+        printf("  %s\n",line.b?line.b:""); free(line.b); }
+    free(resp); return 0;
+}
+/* premieres: GetIMDB.php (PostAction=GET) */
+static int cmd_n24_premieres(void){
+    const char*bnd="----aqnapiprg000001"; SB b; sb_init(&b);
+    prg_field(&b,bnd,"PostAction","GET",NULL);
+    sb_puts(&b,"--"); sb_puts(&b,bnd); sb_puts(&b,"--\r\n");
+    char*resp=n24_prg_post_ep("GetIMDB.php",b.b,b.len,bnd); free(b.b);
+    if(!resp) die("napisy24: błąd połączenia"); strip_inplace(resp);
+    printf("%s\n", resp[0]?resp:"(pusta odpowiedź)"); free(resp); return 0;
 }
 
 static int cmd_update(int check){
@@ -2055,7 +2269,10 @@ static void usage(void){
 int main(int argc,char**argv){
     const char*cmd=NULL,*out=NULL,*movie=NULL,*lang=NULL,*fmt=NULL,*cfgpath=NULL,*title=NULL,*imdb=NULL,*query=NULL,*season=NULL,*episode=NULL,
         *release=NULL,*resolution=NULL,*duration=NULL,*a_size=NULL,*year=NULL,
-        *title_pl=NULL,*episode_title=NULL,*a_sync=NULL,*proof=NULL,*reason=NULL,*service=NULL;
+        *title_pl=NULL,*episode_title=NULL,*a_sync=NULL,*proof=NULL,*reason=NULL,*service=NULL,
+        *rec_id=NULL,*sms_code=NULL,*info=NULL,*progress=NULL,*set_val=NULL;
+    int notify_off=0, show_fields=0;
+    const char*set_list[32]; int nset=0;
     double fps=0,from_fps=0,to_fps=0,maxd=0,mind=0;
     int keep_tags=0,strip_sdh=0,no_san=0,rebase=1,corrected=0,testing=0,check=0,do_login=0,check_only=0;
     const char*srt=NULL,*translator=NULL,*comment=NULL;
@@ -2087,6 +2304,13 @@ int main(int argc,char**argv){
         else if(!strcmp(a,"--srt")){ if(++i<argc) srt=argv[i]; }
         else if(!strcmp(a,"--translator")){ if(++i<argc) translator=argv[i]; }
         else if(!strcmp(a,"--service")){ if(++i<argc) service=argv[i]; }
+        else if(!strcmp(a,"--id")){ if(++i<argc) rec_id=argv[i]; }
+        else if(!strcmp(a,"--sms-code")){ if(++i<argc) sms_code=argv[i]; }
+        else if(!strcmp(a,"--info")){ if(++i<argc) info=argv[i]; }
+        else if(!strcmp(a,"--progress")){ if(++i<argc) progress=argv[i]; }
+        else if(!strcmp(a,"--set")){ if(++i<argc){ set_val=argv[i]; if(nset<32) set_list[nset++]=argv[i]; } }
+        else if(!strcmp(a,"--off")) notify_off=1;
+        else if(!strcmp(a,"--show")) show_fields=1;
         else if(!strcmp(a,"--comment")){ if(++i<argc) comment=argv[i]; }
         else if(!strcmp(a,"--corrected")) corrected=1;
         else if(!strcmp(a,"--test")||!strcmp(a,"--dry-run")) testing=1;
@@ -2165,6 +2389,18 @@ int main(int argc,char**argv){
             return cmd_n24_delete(cfgpath,a1,reason);
 #else
             fprintf(stderr,"napisy24 delete wymaga wariantu TLS (aqnapi-c-tls.com)\n"); return 2;
+#endif
+        }
+        if(!strcmp(sub,"mediainfo")||!strcmp(sub,"changedata")){ char fpsb[16]=""; if(fps>0) snprintf(fpsb,sizeof fpsb,"%g",fps);
+            return cmd_n24_mediainfo(cfgpath,movie,rec_id,duration,resolution,fpsb[0]?fpsb:NULL,lang?lang:"pl"); }
+        if(!strcmp(sub,"notify")){ return cmd_n24_notify(cfgpath,movie,notify_off,sms_code,lang?lang:"pl"); }
+        if(!strcmp(sub,"trans")){ return cmd_n24_trans(cfgpath,a1,set_val,info,progress); }
+        if(!strcmp(sub,"premieres")||!strcmp(sub,"getimdb")){ return cmd_n24_premieres(); }
+        if(!strcmp(sub,"edit")){
+#ifdef AQNAPI_TLS
+            return cmd_n24_edit(cfgpath,a1,show_fields,set_list,nset,srt);
+#else
+            fprintf(stderr,"napisy24 edit wymaga wariantu TLS (aqnapi-c-tls.com)\n"); return 2;
 #endif
         }
         fprintf(stderr,"napisy24: '%s' nieobsługiwane w wersji C (użyj aqnapi.py)\n",sub); return 2; }
