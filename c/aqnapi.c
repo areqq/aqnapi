@@ -9,7 +9,7 @@
  * Wariant TLS (aqnapi-c-tls.com, monorepo + mbedtls) dodaje HTTPS: opensubtitles
  *   (login/search/download), napisy24 weblogin/upload/delete, update, URL https.
  *
- * Nie przeniesione (użyj aqnapi.py): tylko agregujący `upload` (multi-serwis).
+ * Pokrywa 100% poleceń Pythona (parytet bajtowy dla zaimplementowanego zakresu).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,7 +24,7 @@
 #include <sys/ioctl.h>
 #include "third_party/zlib/zlib.h"
 
-#define VERSION "1.0.10"
+#define VERSION "1.0.11"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
@@ -1305,24 +1305,32 @@ static int np_search(const char*title){
     return 0;
 }
 
+static void np_creds(const char*cfgpath,char*user,size_t us,char*pass,size_t ps);  /* def. niżej */
+/* rdzeń uploadu napiprojekt: hash + POST + parsowanie. Zwraca komunikat (malloc,
+ * semantyka Pythona: warning|error|status|"brak statusu"); *ok ustawia. Zakłada
+ * obecny plik movie i (przy authenticate) creds. die() przy błędzie połączenia. */
+static char* np_upload_core(const char*movie,const char*text,size_t sl,const char*lang,
+                            const char*author,int corrected,const char*comment,int testing,
+                            int authenticate,const char*user,const char*pass,int*ok){
+    char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); exit(1); }
+    char L[8]; snprintf(L,sizeof L,"%s",lang?lang:"PL"); for(char*p=L;*p;p++)*p=toupper((unsigned char)*p);
+    char*xml=np_upload_http(md,(unsigned char*)text,sl,L,author,corrected,comment,testing,authenticate,user,pass);
+    if(!xml) die("napiprojekt: błąd połączenia");
+    char*st=xml_first(xml,"status"),*wr=xml_first(xml,"warning"),*er=xml_first(xml,"error");
+    for(char*p=st;*p;p++)*p=tolower((unsigned char)*p);
+    *ok=!strcmp(st,"uploaded")||!strcmp(st,"success")||!strcmp(st,"ok");
+    char*msg=strdup(wr[0]?wr:(er[0]?er:(st[0]?st:"brak statusu")));
+    free(st);free(wr);free(er);free(xml); return msg;
+}
 static int cmd_np_upload(const char*cfgpath,const char*movie,const char*srt,const char*lang,const char*author,int corrected,const char*comment,int testing,int authenticate){
     if(!movie||!srt) die("napiprojekt upload wymaga --movie i --srt");
     char user[128]="",pass[128]="";
-    if(authenticate){ Ini ini; ini_load(config_path(cfgpath),&ini);
-        snprintf(user,sizeof user,"%s",ini_get(&ini,1,"user")); snprintf(pass,sizeof pass,"%s",ini_get(&ini,1,"pass"));
-        const char*eu=getenv("NAPI_USER"),*ep=getenv("NAPI_PASS"); if(eu&&*eu)snprintf(user,sizeof user,"%s",eu); if(ep&&*ep)snprintf(pass,sizeof pass,"%s",ep);
+    if(authenticate){ np_creds(cfgpath,user,sizeof user,pass,sizeof pass);
         if(!user[0]||!pass[0]){ fprintf(stderr,"Błąd uwierzytelnienia: Upload z logowaniem wymaga loginu i hasła.\n"); return 2; } }
     size_t n; char*raw=read_input(srt,&n); if(!raw){ fprintf(stderr,"Brak pliku: %s\n",srt); return 1; }
     char*text=decode_text((unsigned char*)raw,n); free(raw); size_t sl=strlen(text);
-    char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); free(text); return 1; }
-    char L[8]; snprintf(L,sizeof L,"%s",lang?lang:"PL"); for(char*p=L;*p;p++)*p=toupper((unsigned char)*p);
-    char*xml=np_upload_http(md,(unsigned char*)text,sl,L,author,corrected,comment,testing,authenticate,user[0]?user:NULL,pass[0]?pass:NULL); free(text);
-    if(!xml) die("napiprojekt: błąd połączenia");
-    char*st=xml_first(xml,"status"),*wr=xml_first(xml,"warning"),*er=xml_first(xml,"error");
-    int ok=!strcasecmp(st,"uploaded")||!strcasecmp(st,"success")||!strcasecmp(st,"ok");
-    int rc; if(ok){ printf("[OK] %s\n", wr[0]?wr:(er[0]?er:st)); rc=0; }
-    else { printf("[BŁĄD] %s\n", er[0]?er:(wr[0]?wr:(st[0]?st:"serwer odrzucił upload"))); rc=1; }
-    free(st);free(wr);free(er);free(xml); return rc;
+    int ok; char*msg=np_upload_core(movie,text,sl,lang,author,corrected,comment,testing,authenticate,user[0]?user:NULL,pass[0]?pass:NULL,&ok);
+    free(text); printf("[%s] %s\n", ok?"OK":"BŁĄD", msg); free(msg); return ok?0:1;
 }
 
 /* creds napiprojekt: config [napiprojekt] user/pass + env NAPI_USER/NAPI_PASS */
@@ -1664,11 +1672,17 @@ static int n24_web_login(const char*cfgpath){
 }
 static int cmd_n24_weblogin(const char*cfgpath){ if(n24_web_login(cfgpath)){ printf("Zalogowano do napisy24 (WWW).\n"); return 0; } fprintf(stderr,"napisy24: logowanie WWW nieudane\n"); return 1; }
 
-/* walidacja lokalna jak check_srt_for_napisy24: max 2 linie/blok. Zwraca liczbę problemów. */
-static int n24_check_srt(const char*text,char*first,size_t fsz){
-    Cues c; cues_init(&c); parse_any(text,DEFAULT_FPS,&c); int probs=0; first[0]=0;
+/* walidacja lokalna jak check_srt_for_napisy24: >2 linie/blok + nachodzące czasy.
+ * Zwraca liczbę problemów; `out` = wszystkie problemy złączone "\n  " (jak Python join). */
+static int n24_check_srt(const char*text,char*out,size_t osz){
+    Cues c; cues_init(&c); parse_any(text,DEFAULT_FPS,&c); int probs=0; out[0]=0; size_t used=0;
+    #define N24ADD(...) do{ char _l[128]; snprintf(_l,sizeof _l,__VA_ARGS__); \
+        if(probs && used<osz) used+=snprintf(out+used,osz-used,"\n  "); \
+        if(used<osz) used+=snprintf(out+used,osz-used,"%s",_l); probs++; }while(0)
     for(int i=0;i<c.n;i++){ int real=0; for(int k=0;k<c.a[i].nlines;k++){ int ne=0; for(char*q=c.a[i].lines[k];*q;q++) if(!is_ascii_ws(*q)){ ne=1; break; } if(ne) real++; }
-        if(real>2){ if(!probs) snprintf(first,fsz,"Blok %d: %d linii tekstu (max 2)",i+1,real); probs++; } }
+        if(real>2) N24ADD("Blok %d: %d linii tekstu (max 2)",i+1,real); }
+    for(int i=0;i<c.n-1;i++){ if(c.a[i].end > c.a[i+1].start) N24ADD("Bloki %d/%d: nachodzące czasy",i+1,i+2); }
+    #undef N24ADD
     return probs;
 }
 /* normalizacja do CRLF (jak normalize_for_napisy24) — zwraca bajty (malloc) + len */
@@ -1682,15 +1696,13 @@ static unsigned char* n24_normalize_crlf(const char*text,size_t*outlen){
     free(e.b); *outlen=s.len; return (unsigned char*)s.b;
 }
 typedef struct { const char*imdb,*title,*title_pl,*year,*release,*translator,*sync,*proof,*resolution,*duration,*size,*fps,*season,*episode,*episode_title; } N24Meta;
-static int cmd_n24_upload(const char*cfgpath,const char*srt,const N24Meta*m,int dry){
-    if(!srt){ fprintf(stderr,"napisy24 upload wymaga --srt\n"); return 2; }
-    size_t rn; char*raw=read_input(srt,&rn); if(!raw){ fprintf(stderr,"Brak pliku: %s\n",srt); return 1; }
-    char*text=decode_text((unsigned char*)raw,rn); free(raw);
-    char prob[128]; int probs=n24_check_srt(text,prob,sizeof prob);
-    if(probs){ fprintf(stderr,"Plik nie przejdzie walidacji Napisy24:\n  %s\n",prob); free(text); return 1; }
-    if(dry){ printf("[OK] dry-run: plik poprawny (nie wysłano)\n"); free(text); return 0; }
-    if(!n24_web_login(cfgpath)){ free(text); return 2; }
-    size_t fl; unsigned char*fb=n24_normalize_crlf(text,&fl); free(text);
+/* rdzeń web-uploadu napisy24 (/dodaj-napisy): login + multipart + POST.
+ * Zwraca komunikat (malloc): "OK" / "Serwer nie potwierdził dodania" /
+ * "napisy24: logowanie nieudane". *ok ustawia. Tekst NIE jest zwalniany. */
+static char* n24_web_upload_run(const char*cfgpath,const char*srt,const char*text,const N24Meta*m,int*ok){
+    *ok=0;
+    if(!n24_web_login(cfgpath)) return strdup("napisy24: logowanie nieudane");
+    size_t fl; unsigned char*fb=n24_normalize_crlf(text,&fl);
     int serial = m->season && m->season[0];
     const char*bnd="----aqnapin24form"; SB b; sb_init(&b);
     #define FT(nm,val) do{ sb_puts(&b,"--");sb_puts(&b,bnd);sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"");sb_puts(&b,nm);sb_puts(&b,"\"\r\n\r\n");sb_puts(&b,val?val:"");sb_puts(&b,"\r\n"); }while(0)
@@ -1710,8 +1722,18 @@ static int cmd_n24_upload(const char*cfgpath,const char*srt,const N24Meta*m,int 
     sb_puts(&b,"--");sb_puts(&b,bnd);sb_puts(&b,"--\r\n"); free(fb);
     char ct[128]; snprintf(ct,sizeof ct,"Content-Type: multipart/form-data; boundary=%s\r\n",bnd);
     int st; size_t n; char*resp=https_fetch("POST","napisy24.pl","/dodaj-napisy",ct,b.b,&st,&n,0); free(b.b);
-    int ok = resp && (strstr(resp,"Napisy Dodane/Zmienione")||strstr(resp,"dziękujemy")); free(resp);
-    printf("[%s] %s\n", ok?"OK":"BŁĄD", ok?"dodano/zmieniono":"serwer nie potwierdził dodania"); return ok?0:1;
+    *ok = resp && (strstr(resp,"Napisy Dodane/Zmienione")||strstr(resp,"dziękujemy")); free(resp);
+    return strdup(*ok?"OK":"Serwer nie potwierdził dodania");
+}
+static int cmd_n24_upload(const char*cfgpath,const char*srt,const N24Meta*m,int dry){
+    if(!srt){ fprintf(stderr,"napisy24 upload wymaga --srt\n"); return 2; }
+    size_t rn; char*raw=read_input(srt,&rn); if(!raw){ fprintf(stderr,"Brak pliku: %s\n",srt); return 1; }
+    char*text=decode_text((unsigned char*)raw,rn); free(raw);
+    char prob[512]; int probs=n24_check_srt(text,prob,sizeof prob);
+    if(probs){ fprintf(stderr,"Błąd: Plik nie przejdzie walidacji Napisy24:\n  %s\n",prob); free(text); return 1; }
+    if(dry){ printf("[OK] dry-run: plik poprawny (nie wysłano)\n"); free(text); return 0; }
+    int wok; char*wmsg=n24_web_upload_run(cfgpath,srt,text,m,&wok); free(text);
+    printf("[%s] %s\n", wok?"OK":"BŁĄD", wmsg); free(wmsg); return wok?0:1;
 }
 static int cmd_n24_delete(const char*cfgpath,const char*id,const char*reason){
     if(!id){ fprintf(stderr,"napisy24 delete wymaga ID\n"); return 2; }
@@ -1725,6 +1747,58 @@ static int cmd_n24_delete(const char*cfgpath,const char*id,const char*reason){
     printf("[%s] %s\n", ok?"OK":"BŁĄD", ok?"usunięto":"nie potwierdzono usunięcia"); return ok?0:1;
 }
 #endif /* AQNAPI_TLS */
+
+/* Agregujący upload (multi-serwis) — jak Python cmd_upload. Domyślny serwis: np.
+ * Wypisuje "[OK/BŁĄD] serwis: komunikat" w stałej kolejności np -> n24 -> os. */
+static int cmd_agg_upload(const char*cfgpath,const char*service,const char*srt,const char*movie,
+    const char*lang,const char*translator,int corrected,const char*comment,int dry,int do_login,
+    const char*imdb,const char*title,const char*title_pl,const char*year,const char*release,
+    const char*a_sync,const char*proof,const char*resolution,const char*duration,const char*a_size,
+    const char*fpsstr,const char*season,const char*episode,const char*episode_title){
+    if(!srt){ fprintf(stderr,"upload wymaga --srt\n"); return 2; }
+    size_t rn; char*raw=read_input(srt,&rn); if(!raw){ fprintf(stderr,"Brak pliku: %s\n",srt); return 1; }
+    char*text=decode_text((unsigned char*)raw,rn); free(raw); size_t sl=strlen(text);
+    /* parsuj --service (tokenowo, aliasy jak Python); pusty -> np */
+    int wantnp=0,wantn24=0,wantos=0,anyvalid=0;
+    char svc[128]; snprintf(svc,sizeof svc,"%s",service&&service[0]?service:"np");
+    for(char*p=svc;*p;p++)*p=tolower((unsigned char)*p);
+    for(char*tok=strtok(svc," ,\t");tok;tok=strtok(NULL," ,\t")){
+        if(!strcmp(tok,"napiprojekt")||!strcmp(tok,"np")){ wantnp=1; anyvalid=1; }
+        else if(!strcmp(tok,"napisy24")||!strcmp(tok,"n24")){ wantn24=1; anyvalid=1; }
+        else if(!strcmp(tok,"opensubtitles")||!strcmp(tok,"os")){ wantos=1; anyvalid=1; } }
+    if(!anyvalid){ wantnp=wantn24=wantos=1; }
+    int rc=0;
+    if(wantnp){
+        if(!movie){ printf("[BŁĄD] napiprojekt: napiprojekt upload wymaga --movie (hash pliku filmowego)\n"); rc=1; }
+        else {
+            char user[128]="",pass[128]=""; int credok=1;
+            if(do_login){ np_creds(cfgpath,user,sizeof user,pass,sizeof pass);
+                if(!user[0]||!pass[0]){ printf("[BŁĄD] napiprojekt: Upload z logowaniem wymaga loginu i hasła.\n"); rc=1; credok=0; } }
+            if(credok){ int ok; char*msg=np_upload_core(movie,text,sl,lang,translator,corrected,comment,dry,do_login,user[0]?user:NULL,pass[0]?pass:NULL,&ok);
+                printf("[%s] napiprojekt: %s\n", ok?"OK":"BŁĄD", msg); free(msg); if(!ok) rc=1; } } }
+    if(wantn24){
+#ifdef AQNAPI_TLS
+        char prob[512]; int probs=n24_check_srt(text,prob,sizeof prob);
+        if(probs){ printf("[BŁĄD] napisy24: Plik nie przejdzie walidacji Napisy24:\n  %s\n",prob); rc=1; }
+        else if(dry){ printf("[OK] napisy24: dry-run: plik poprawny (nie wysłano)\n"); }
+        else {
+            char login[128],pw[128]; Ini ini; ini_load(config_path(cfgpath),&ini);
+            snprintf(login,sizeof login,"%s",ini_get(&ini,0,"login")); snprintf(pw,sizeof pw,"%s",ini_get(&ini,0,"pass"));
+            const char*eu=getenv("NAPI24_LOGIN"),*ep=getenv("NAPI24_PASS"); if(eu&&*eu)snprintf(login,sizeof login,"%s",eu); if(ep&&*ep)snprintf(pw,sizeof pw,"%s",ep);
+            if(!login[0]||!pw[0]){ printf("[BŁĄD] napisy24: napisy24 upload wymaga loginu i hasła\n"); rc=1; }
+            else {
+                char szbuf[32]=""; if(a_size&&a_size[0]) snprintf(szbuf,sizeof szbuf,"%s",a_size); else if(movie) snprintf(szbuf,sizeof szbuf,"%ld",input_size(movie));
+                char imn[16]=""; if(imdb&&imdb[0]) norm_imdb(imdb,imn,sizeof imn);
+                N24Meta m={imn,title,title_pl,year,release,translator,a_sync,proof,resolution,duration,szbuf,fpsstr&&fpsstr[0]?fpsstr:"23.976",season,episode,episode_title};
+                int ok; char*msg=n24_web_upload_run(cfgpath,srt,text,&m,&ok);
+                printf("[%s] napisy24: %s\n", ok?"OK":"BŁĄD", msg); free(msg); if(!ok) rc=1; } }
+#else
+        printf("[BŁĄD] napisy24: upload przez formularz WWW wymaga wariantu TLS (aqnapi-c-tls.com)\n"); rc=1;
+#endif
+    }
+    if(wantos){ printf("[BŁĄD] opensubtitles: Upload do OpenSubtitles nie jest dostępny w REST API (patrz docs/opensubtitles.md)\n"); rc=1; }
+    free(text); return rc;
+}
 
 /* ----------------------------------------------------------- URL jako wejście
  * Pobieranie zakresowe (Range) — tylko potrzebne fragmenty, minimalna pamięć.
@@ -1981,7 +2055,7 @@ static void usage(void){
 int main(int argc,char**argv){
     const char*cmd=NULL,*out=NULL,*movie=NULL,*lang=NULL,*fmt=NULL,*cfgpath=NULL,*title=NULL,*imdb=NULL,*query=NULL,*season=NULL,*episode=NULL,
         *release=NULL,*resolution=NULL,*duration=NULL,*a_size=NULL,*year=NULL,
-        *title_pl=NULL,*episode_title=NULL,*a_sync=NULL,*proof=NULL,*reason=NULL;
+        *title_pl=NULL,*episode_title=NULL,*a_sync=NULL,*proof=NULL,*reason=NULL,*service=NULL;
     double fps=0,from_fps=0,to_fps=0,maxd=0,mind=0;
     int keep_tags=0,strip_sdh=0,no_san=0,rebase=1,corrected=0,testing=0,check=0,do_login=0,check_only=0;
     const char*srt=NULL,*translator=NULL,*comment=NULL;
@@ -2012,6 +2086,7 @@ int main(int argc,char**argv){
         else if(!strcmp(a,"--reason")){ if(++i<argc) reason=argv[i]; }
         else if(!strcmp(a,"--srt")){ if(++i<argc) srt=argv[i]; }
         else if(!strcmp(a,"--translator")){ if(++i<argc) translator=argv[i]; }
+        else if(!strcmp(a,"--service")){ if(++i<argc) service=argv[i]; }
         else if(!strcmp(a,"--comment")){ if(++i<argc) comment=argv[i]; }
         else if(!strcmp(a,"--corrected")) corrected=1;
         else if(!strcmp(a,"--test")||!strcmp(a,"--dry-run")) testing=1;
@@ -2049,6 +2124,9 @@ int main(int argc,char**argv){
     if(!strcmp(cmd,"update")){ return cmd_update(check); }
     if(!strcmp(cmd,"get")){ if(!pos){usage();return 2;} return cmd_get(pos,lang,out,fps,opt); }
     if(!strcmp(cmd,"search")){ return cmd_search(imdb,title,query,lang); }
+    if(!strcmp(cmd,"upload")){ char fpsb[16]=""; if(fps>0) snprintf(fpsb,sizeof fpsb,"%g",fps);
+        return cmd_agg_upload(cfgpath,service,srt,movie,lang,translator,corrected,comment,testing,do_login,
+            imdb,title,title_pl,year,release,a_sync,proof,resolution,duration,a_size,fpsb[0]?fpsb:NULL,season,episode,episode_title); }
     if(!strcmp(cmd,"napiprojekt")||!strcmp(cmd,"np")){ const char*sub=nfiles>0?files[0]:NULL,*a1=nfiles>1?files[1]:NULL; if(!sub){usage();return 2;}
         if(!strcmp(sub,"download")){ if(!a1){usage();return 2;} return cmd_download(a1,lang,out,fps,opt); }
         if(!strcmp(sub,"fileinfo")){ if(!a1){usage();return 2;} return cmd_np_fileinfo(a1); }
