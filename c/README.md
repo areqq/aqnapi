@@ -1,12 +1,14 @@
-# aqnapi — natywna wersja C (POC, Cosmopolitan)
+# aqnapi — natywna wersja C (Cosmopolitan)
 
-Niezależna reimplementacja **podzbioru** aqnapi w czystym C, kompilowana przez
+Niezależna reimplementacja aqnapi w czystym C, kompilowana przez
 [`cosmocc`](https://github.com/jart/cosmopolitan) do jednej uniwersalnej binarki
 APE (`dist/aqnapi-c.com`) działającej na Linux/macOS/Windows/*BSD (x86-64+ARM64).
 
-To **proof of concept** obok wersji Python (`aqnapi.py`). Wersja Python pozostaje
-kompletna i referencyjna; wersja C ma być **maksymalnie zgodna bajtowo** w
-zakresie, który obejmuje.
+To **pełny natywny port** obok wersji Python (`aqnapi.py`) — pokrywa **większość
+poleceń** i jest **100% bajtowo zgodny** z Pythonem dla zaimplementowanego
+podzbioru. Wersja Python pozostaje kompletna i referencyjna; każda zmiana idzie
+w OBU wersjach (zob. `CLAUDE.md`). Świadomie poza portem: interaktywny TUI
+`sync` (curses) i `config`.
 
 ## Zakres (stan bieżący)
 
