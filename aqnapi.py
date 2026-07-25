@@ -38,7 +38,7 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 USER_AGENT_OS = f"aqnapi v{__version__}"
 
 __all__ = [
@@ -118,11 +118,24 @@ class ConfigError(AqError):
 
 def oshash(path: str) -> str:
     """Hash OpenSubtitles / MPC (OSH): filesize + suma pierwszych i ostatnich
-    64 KiB czytanych jako little-endian uint64. Zwraca 16 znaków hex (małe)."""
+    64 KiB czytanych jako little-endian uint64. Zwraca 16 znaków hex (małe).
+    Dla URL-a: rozmiar + dwa zakresy po 64 KiB (bez pobierania całości)."""
+    mask = 0xFFFFFFFFFFFFFFFF
+    if is_url(path):
+        size = url_size(path)
+        if size < 2 * OSH_CHUNK:
+            raise AqError(f"Plik za mały na hash OSH (min. {2 * OSH_CHUNK} B): {path}")
+        head = url_read_range(path, 0, OSH_CHUNK)
+        tail = url_read_range(path, size - OSH_CHUNK, OSH_CHUNK)
+        h = size & mask
+        for i in range(OSH_CHUNK // 8):
+            h = (h + struct.unpack_from("<Q", head, i * 8)[0]) & mask
+        for i in range(OSH_CHUNK // 8):
+            h = (h + struct.unpack_from("<Q", tail, i * 8)[0]) & mask
+        return "%016x" % h
     size = os.path.getsize(path)
     if size < 2 * OSH_CHUNK:
         raise AqError(f"Plik za mały na hash OSH (min. {2 * OSH_CHUNK} B): {path}")
-    mask = 0xFFFFFFFFFFFFFFFF
     h = size & mask
     with open(path, "rb") as f:
         for _ in range(OSH_CHUNK // 8):
@@ -134,10 +147,21 @@ def oshash(path: str) -> str:
 
 
 def md5_10mb(path: str) -> str:
-    """Hash napiprojekt: MD5 pierwszych 10 MiB pliku (32 hex, małe)."""
+    """Hash napiprojekt: MD5 pierwszych 10 MiB pliku (32 hex, małe).
+    Dla URL-a: strumieniowo przez Range (stała pamięć), bez pobierania całości."""
     m = hashlib.md5()
-    with open(path, "rb") as f:
-        m.update(f.read(CHUNK_10MB))
+    if is_url(path):
+        got = 0
+        with _url_open(path, {"Range": "bytes=0-%d" % (CHUNK_10MB - 1)}) as r:
+            while got < CHUNK_10MB:
+                chunk = r.read(min(262144, CHUNK_10MB - got))
+                if not chunk:
+                    break
+                m.update(chunk)
+                got += len(chunk)
+    else:
+        with open(path, "rb") as f:
+            m.update(f.read(CHUNK_10MB))
     return m.hexdigest()
 
 
@@ -159,9 +183,124 @@ def file_hashes(path: str) -> Dict[str, object]:
     return {
         "osh": oshash(path),
         "md5_10mb": md5_10mb(path),
-        "size": os.path.getsize(path),
-        "name": os.path.basename(path),
+        "size": input_size(path),
+        "name": os.path.basename(
+            urllib.parse.urlsplit(path).path if is_url(path) else path),
     }
+
+
+# ===========================================================================
+# URL jako plik wejściowy — http(s) z opcjonalnym `user:pass@` (Basic auth).
+# Pobieramy INTELIGENTNIE tylko potrzebne fragmenty (nagłówek Range), nigdy
+# całego filmu: md5_10mb → pierwsze 10 MiB strumieniowo; oshash → rozmiar +
+# 2×64 KiB; FPS → ograniczony prefiks; napisy → całość (to kilka KB).
+# Dzięki temu zużycie pamięci jest stałe/ograniczone. Bez plików tymczasowych.
+# ===========================================================================
+
+_URL_RE = re.compile(r"(?i)^https?://")
+FPS_URL_PREFIX = 8 * 1024 * 1024   # ile bajtów prefiksu ściągać do odczytu FPS
+
+
+def is_url(s: object) -> bool:
+    """Czy łańcuch wygląda jak URL http/https."""
+    return isinstance(s, str) and _URL_RE.match(s) is not None
+
+
+def _url_split_auth(url: str) -> Tuple[str, Dict[str, str]]:
+    """Rozdziel URL na (czysty_url, nagłówki). Basic auth z części `user:pass@`
+    (jak curl -u / przeglądarka)."""
+    parts = urllib.parse.urlsplit(url)
+    headers = {"User-Agent": "Mozilla/5.0 (aqnapi)"}
+    netloc = parts.netloc
+    if "@" in netloc:
+        userinfo, netloc = netloc.rsplit("@", 1)
+        userinfo = urllib.parse.unquote(userinfo)
+        if ":" not in userinfo:
+            userinfo += ":"
+        token = base64.b64encode(userinfo.encode("utf-8")).decode("ascii")
+        headers["Authorization"] = "Basic " + token
+    clean = urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, parts.query, ""))
+    return clean, headers
+
+
+def _url_open(url: str, extra: Optional[Dict[str, str]] = None):
+    """Otwórz URL (z Basic auth i opcjonalnymi nagłówkami). Zwraca odpowiedź."""
+    clean, headers = _url_split_auth(url)
+    if extra:
+        headers.update(extra)
+    req = urllib.request.Request(clean, headers=headers)
+    try:
+        return urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT)
+    except urllib.error.HTTPError as e:
+        raise NetworkError(f"Pobranie URL nieudane (HTTP {e.code}): {url}") from e
+    except (urllib.error.URLError, OSError) as e:
+        raise NetworkError(f"Pobranie URL nieudane: {url} ({e})") from e
+
+
+def url_read_full(url: str) -> bytes:
+    """Pobierz całą zawartość URL (dla małych plików: napisy)."""
+    with _url_open(url) as r:
+        return r.read()
+
+
+def url_read_range(url: str, start: int, length: int) -> bytes:
+    """Pobierz [start, start+length) bajtów przez nagłówek Range.
+
+    Wymaga odpowiedzi ``206 Partial Content`` dla odczytów z przesunięciem
+    (``start > 0``) — inaczej serwer zignorował Range i zwrócił całość od
+    początku, co dałoby CICHO błędne bajty (a przy dużym pliku pobrałoby
+    gigabajty). Dla ``start == 0`` odpowiedź ``200`` jest bezpieczna (czytamy
+    od początku)."""
+    end = start + length - 1
+    with _url_open(url, {"Range": "bytes=%d-%d" % (start, end)}) as r:
+        code = r.getcode()
+        if start > 0 and code != 206:
+            raise NetworkError(
+                f"Serwer nie wspiera żądań zakresowych (Range) — HTTP {code}: {url}")
+        return r.read(length)
+
+
+def url_size(url: str) -> int:
+    """Rozmiar zasobu: z Content-Range (Range 0-0) lub Content-Length."""
+    with _url_open(url, {"Range": "bytes=0-0"}) as r:
+        cr = r.headers.get("Content-Range")
+        if cr and "/" in cr:
+            tot = cr.rsplit("/", 1)[1].strip()
+            if tot.isdigit():
+                return int(tot)
+        cl = r.headers.get("Content-Length")
+        if cl and cl.isdigit():
+            return int(cl)
+    raise NetworkError(f"Serwer nie podał rozmiaru zasobu: {url}")
+
+
+def read_input_bytes(path: str) -> bytes:
+    """Wczytaj cały plik wejściowy (URL http(s) lub ścieżka lokalna)."""
+    if is_url(path):
+        return url_read_full(path)
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def input_size(path: str) -> int:
+    """Rozmiar wejścia (URL lub plik lokalny)."""
+    return url_size(path) if is_url(path) else os.path.getsize(path)
+
+
+def input_exists(path: str) -> bool:
+    """Czy wejście istnieje/nadaje się do odczytu (URL traktujemy jak istniejące)."""
+    return is_url(path) or os.path.isfile(path)
+
+
+def _input_stem(path: Optional[str]) -> str:
+    """Człon nazwy wyjściowej dla `path`. Dla URL-a bierze nazwę pliku z URL-a
+    (w bieżącym katalogu), nie ze ścieżki serwera."""
+    if not path:
+        return "napisy"
+    if is_url(path):
+        base = os.path.basename(urllib.parse.urlsplit(path).path) or "napisy"
+        return os.path.splitext(base)[0]
+    return os.path.splitext(path)[0]
 
 
 # ===========================================================================
@@ -324,22 +463,32 @@ def _fps_mp4(f, flen: int) -> Optional[float]:
     return None
 
 
+def _fps_from_stream(f, flen: int) -> Optional[float]:
+    """Rozpoznaj kontener i odczytaj FPS z obiektu plikopodobnego (read/seek)."""
+    magic = f.read(8)
+    f.seek(0)
+    if magic[:4] == b"\x1a\x45\xdf\xa3":
+        return _fps_mkv(f)
+    if magic[:4] == b"RIFF":
+        return _fps_avi(f)
+    if magic[4:8] == b"ftyp":
+        return _fps_mp4(f, flen)
+    return None
+
+
 def fps_from_file(path: str) -> Optional[float]:
-    """Odczytaj FPS z pliku filmowego (MKV/AVI/MP4/MOV). None jeśli się nie da."""
+    """Odczytaj FPS z pliku filmowego (MKV/AVI/MP4/MOV). None jeśli się nie da.
+    Dla URL-a pobiera tylko ograniczony prefiks (``FPS_URL_PREFIX``) przez Range —
+    wystarcza dla MKV/AVI i MP4 z moov na początku (faststart); przy moov na
+    końcu FPS z URL-a jest niedostępny i następuje fallback (metadane/flaga)."""
     try:
+        if is_url(path):
+            size = url_size(path)
+            prefix = url_read_range(path, 0, min(FPS_URL_PREFIX, size))
+            return _fps_from_stream(io.BytesIO(prefix), len(prefix))
         with open(path, "rb") as f:
-            magic = f.read(8)
-            f.seek(0)
-            if magic[:4] == b"\x1a\x45\xdf\xa3":
-                return _fps_mkv(f)
-            if magic[:4] == b"RIFF":
-                return _fps_avi(f)
-            if magic[4:8] == b"ftyp":
-                f.seek(0, os.SEEK_END)
-                flen = f.tell()
-                f.seek(0)
-                return _fps_mp4(f, flen)
-    except (OSError, struct.error, AqError):
+            return _fps_from_stream(f, os.path.getsize(path))
+    except (OSError, struct.error, AqError, NetworkError):
         return None
     return None
 
@@ -2225,8 +2374,7 @@ def convert_file(input_path: str, output_path: Optional[str] = None, *,
 
     Domyślnie stosuje bezpieczne korekty (usuwanie tagów, docinanie zbyt długich
     i nakładających się czasów) — zob. :func:`sanitize_cues`."""
-    with open(input_path, "rb") as f:
-        raw = f.read()
+    raw = read_input_bytes(input_path)
     resolved_fps = _resolve_fps(movie_path, None, fps)
     out = _default_out(input_path, output_path)
     data = convert_to_srt_bytes(raw, fps=resolved_fps, sanitize=sanitize,
@@ -2244,7 +2392,7 @@ def convert_file(input_path: str, output_path: Optional[str] = None, *,
 def _resolve_fps(movie_path: Optional[str], hit_fps: Optional[float],
                  flag_fps: Optional[float]) -> float:
     """Łańcuch źródeł FPS: plik filmowy -> metadane serwisu -> flaga -> domyślny."""
-    if movie_path and os.path.isfile(movie_path):
+    if movie_path and input_exists(movie_path):
         f = trusted_fps(fps_from_file(movie_path))
         if f:
             return f
@@ -2259,8 +2407,7 @@ def _default_out(movie_path: Optional[str], explicit: Optional[str]) -> str:
     if explicit:
         return explicit
     if movie_path:
-        stem = os.path.splitext(movie_path)[0]
-        return stem + ".srt"
+        return _input_stem(movie_path) + ".srt"
     return "napisy.srt"
 
 
@@ -2408,8 +2555,7 @@ def cmd_convert(args, cfg):
     out = _default_out(args.input, args.output)
     fmt = _out_format(out, getattr(args, "format", None))
     if fmt == "srt":
-        with open(args.input, "rb") as f:
-            _save_subtitles(f.read(), out, fps, _sanitize_kw(args))
+        _save_subtitles(read_input_bytes(args.input), out, fps, _sanitize_kw(args))
         return 0
     # eksport do innego formatu: parsuj -> (sanityzuj) -> emituj
     cues = _load_cues(args.input, fps)
@@ -2435,7 +2581,7 @@ def cmd_fpsconv(args, cfg):
     cues = _load_cues(args.input, from_fps)
     scale = from_fps / to_fps
     conv = apply_sync(cues, scale, 0.0)
-    out = args.output or (os.path.splitext(args.input)[0] + f".{to_fps:g}fps.srt")
+    out = args.output or (_input_stem(args.input) + f".{to_fps:g}fps.srt")
     fmt = _out_format(out, getattr(args, "format", None))
     with open(out, "wb") as f:
         f.write(emit_subtitle(conv, fmt, to_fps))
@@ -2462,7 +2608,7 @@ def cmd_merge(args, cfg):
         shifted = apply_sync(cues, 1.0, shift)
         merged += shifted
         running_end = max([running_end] + [c.end_ms for c in shifted])
-    out = args.output or (os.path.splitext(files[0])[0] + ".merged.srt")
+    out = args.output or (_input_stem(files[0]) + ".merged.srt")
     fmt = _out_format(out, getattr(args, "format", None))
     with open(out, "wb") as f:
         f.write(emit_subtitle(merged, fmt, fps))
@@ -2487,7 +2633,7 @@ def cmd_split(args, cfg):
         parts[bisect.bisect_right(points, cue.start_ms)].append(cue)
     fmt = getattr(args, "format", None) or "srt"
     ext = _EXT_FOR.get(fmt, "srt")
-    base = args.output or os.path.splitext(args.input)[0]
+    base = args.output or _input_stem(args.input)
     written = []
     for i, part in enumerate(parts):
         if not part:
@@ -2565,8 +2711,7 @@ def cmd_config(args, cfg):
 
 def _load_cues(path: str, fps: float = DEFAULT_FPS) -> List[Cue]:
     """Wczytaj plik napisów (ew. ZIP) i sparsuj do listy Cue."""
-    with open(path, "rb") as f:
-        raw = f.read()
+    raw = read_input_bytes(path)
     if raw[:2] == b"PK":
         raw = extract_from_zip(raw)
     cues = parse_any(decode_text(raw), fps=fps)
@@ -2581,7 +2726,7 @@ def cmd_sync(args, cfg):
     fps = args.fps or DEFAULT_FPS
     ref_cues = _load_cues(args.reference, fps)
     tgt_cues = _load_cues(args.target, fps)
-    out = args.output or (os.path.splitext(args.target)[0] + ".synced.srt")
+    out = args.output or (_input_stem(args.target) + ".synced.srt")
 
     work = tgt_cues
     if args.offset is not None:
@@ -2969,7 +3114,7 @@ def _release_tokens(s: str) -> set:
 def _score_release(hit: SubtitleHit, movie_path: str) -> float:
     """Dopasowanie wyniku do nazwy pliku filmowego (im więcej wspólnych tokenów
     release, tym lepiej); remis rozstrzyga liczba pobrań."""
-    stem = os.path.splitext(os.path.basename(movie_path))[0]
+    stem = os.path.basename(_input_stem(movie_path))
     ft = _release_tokens(stem)
     ht = _release_tokens((hit.release or "") + " " + (hit.title or ""))
     inter = len(ft & ht) if (ft and ht) else 0
@@ -3095,9 +3240,7 @@ def _print_hits(hits: List[SubtitleHit]):
 def cmd_upload(args, cfg):
     services = _parse_services(args.service, default="np")
     results = []
-    with open(args.srt, "rb") as f:
-        srt_raw = f.read()
-    srt_text = decode_text(srt_raw)
+    srt_text = decode_text(read_input_bytes(args.srt))
 
     if "np" in services:
         try:
@@ -3227,8 +3370,7 @@ def cmd_n24(args, cfg):
         print(client.imdb_info(args.imdb)["raw"])
         return 0
     if args.n24_cmd == "upload":
-        with open(args.srt, "rb") as f:
-            r = _n24_upload(args, cfg, decode_text(f.read()))
+        r = _n24_upload(args, cfg, decode_text(read_input_bytes(args.srt)))
         print(f"[{'OK' if r.ok else 'BŁĄD'}] {r.message}")
         return 0 if r.ok else 1
     if args.n24_cmd == "delete":
@@ -3290,8 +3432,7 @@ def cmd_np(args, cfg):
         print(f"FPS (serwer): {fps}" if fps else "Brak danych FPS")
         return 0
     if args.np_cmd == "upload":
-        with open(args.srt, "rb") as f:
-            r = _np_upload(args, cfg, decode_text(f.read()))
+        r = _np_upload(args, cfg, decode_text(read_input_bytes(args.srt)))
         print(f"[{'OK' if r.ok else 'BŁĄD'}] {r.message}")
         return 0 if r.ok else 1
     return 2
@@ -3567,6 +3708,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             setattr(args, attr, None)
     if not hasattr(args, "force"):
         args.force = False
+    # URL-e http(s) jako ścieżki wejściowe są rozpoznawane przez is_url() na
+    # poziomie odczytu (read_input_bytes / md5_10mb / oshash / fps_from_file) —
+    # pobieramy tylko potrzebne fragmenty (Range), bez plików tymczasowych.
     try:
         return args.func(args, cfg)
     except AuthError as e:

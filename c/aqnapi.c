@@ -26,7 +26,7 @@
 #include <sys/ioctl.h>
 #include "third_party/zlib/zlib.h"
 
-#define VERSION "1.0.4"
+#define VERSION "1.0.5"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
@@ -93,7 +93,28 @@ static void hexlower(const unsigned char*in,int n,char*out){ static const char*h
 /* ---------------------------------------------------------------- hasze plików */
 static long file_size(const char*path){ struct stat st; if(stat(path,&st)!=0) return -1; return (long)st.st_size; }
 
+/* URL http(s) jako wejście — pobieramy tylko potrzebne fragmenty (Range).
+ * Definicje url_* są niżej (po https_fetch); tutaj deklaracje wyprzedzające. */
+static int is_url(const char*s){ return s && (!strncmp(s,"http://",7)||!strncmp(s,"https://",8)); }
+static unsigned char* url_read_range(const char*url,long start,long length,size_t*outlen);
+static unsigned char* url_read_full(const char*url,size_t*outlen);
+static long url_size(const char*url);
+/* Rozmiar wejścia (URL lub plik lokalny). */
+static long input_size(const char*path){ return is_url(path)? url_size(path) : file_size(path); }
+
 static int oshash(const char*path,char out[17]){
+    if(is_url(path)){
+        long size=url_size(path); if(size<2*OSH_CHUNK) return -1;
+        size_t hn=0,tn=0; unsigned char*head=url_read_range(path,0,OSH_CHUNK,&hn);
+        if(!head||hn<OSH_CHUNK){ free(head); return -2; }
+        unsigned char*tail=url_read_range(path,size-OSH_CHUNK,OSH_CHUNK,&tn);
+        if(!tail||tn<OSH_CHUNK){ free(head); free(tail); return -2; }
+        uint64_t h=(uint64_t)size, w;
+        for(int i=0;i<OSH_CHUNK/8;i++){ memcpy(&w,head+i*8,8); h+=w; }
+        for(int i=0;i<OSH_CHUNK/8;i++){ memcpy(&w,tail+i*8,8); h+=w; }
+        free(head); free(tail);
+        snprintf(out,17,"%016llx",(unsigned long long)h); return 0;
+    }
     long size=file_size(path);
     if(size<2*OSH_CHUNK) return -1;
     FILE*f=fopen(path,"rb"); if(!f) return -2;
@@ -106,8 +127,14 @@ static int oshash(const char*path,char out[17]){
     return 0;
 }
 static int md5_10mb(const char*path,char out[33]){
-    FILE*f=fopen(path,"rb"); if(!f) return -1;
     MD5 m; md5_init(&m);
+    if(is_url(path)){
+        size_t n=0; unsigned char*buf=url_read_range(path,0,CHUNK_10MB,&n);
+        if(!buf) return -1;
+        md5_update(&m,buf,n<CHUNK_10MB?n:(size_t)CHUNK_10MB); free(buf);
+        unsigned char d[16]; md5_final(&m,d); hexlower(d,16,out); return 0;
+    }
+    FILE*f=fopen(path,"rb"); if(!f) return -1;
     unsigned char*buf=xmalloc(1<<20); size_t total=0,r;
     while(total<CHUNK_10MB && (r=fread(buf,1,(size_t)(CHUNK_10MB-total<(1<<20)?CHUNK_10MB-total:(1<<20)),f))>0){ md5_update(&m,buf,r); total+=r; }
     free(buf); fclose(f);
@@ -312,13 +339,27 @@ static double fps_mp4(FILE*f,long flen){
         pos=nx; }
     return 0;
 }
-static double fps_from_file(const char*path){
-    FILE*f=fopen(path,"rb"); if(!f) return 0;
-    unsigned char m[8]; size_t r=fread(m,1,8,f); double v=0;
+/* Rozpoznaj kontener i odczytaj FPS z otwartego strumienia (flen = długość danych). */
+static double fps_from_stream(FILE*f,long flen){
+    unsigned char m[8]; size_t r=fread(m,1,8,f); double v=0; rewind(f);
     if(r>=4 && m[0]==0x1a&&m[1]==0x45&&m[2]==0xdf&&m[3]==0xa3) v=fps_mkv(f);
     else if(r>=4 && !memcmp(m,"RIFF",4)) v=fps_avi(f);
-    else if(r>=8 && !memcmp(m+4,"ftyp",4)){ fseek(f,0,SEEK_END); long fl=ftell(f); v=fps_mp4(f,fl); }
-    fclose(f); return v;
+    else if(r>=8 && !memcmp(m+4,"ftyp",4)) v=fps_mp4(f,flen);
+    return v;
+}
+/* Ile bajtów prefiksu pobrać z URL-a do odczytu FPS (jak w Pythonie: 8 MiB). */
+#define FPS_URL_PREFIX (8*1024*1024)
+static double fps_from_file(const char*path){
+    if(is_url(path)){
+        long size=url_size(path); if(size<=0) return 0;
+        long want = size<FPS_URL_PREFIX ? size : FPS_URL_PREFIX;
+        size_t n=0; unsigned char*buf=url_read_range(path,0,want,&n); if(!buf||!n){ free(buf); return 0; }
+        FILE*f=fmemopen(buf,n,"rb"); double v=0; if(f){ v=fps_from_stream(f,(long)n); fclose(f); }
+        free(buf); return v;
+    }
+    FILE*f=fopen(path,"rb"); if(!f) return 0;
+    fseek(f,0,SEEK_END); long fl=ftell(f); fseek(f,0,SEEK_SET);
+    double v=fps_from_stream(f,fl); fclose(f); return v;
 }
 static double trusted_fps(double v){ return (v>22.0 && v<32.0)?v:0.0; }
 
@@ -869,9 +910,32 @@ static unsigned char* n24_download_id(const char*id,size_t*outlen){
 static char* read_file(const char*path,size_t*len){ FILE*f=fopen(path,"rb"); if(!f) return NULL;
     fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET); char*b=xmalloc(n+1); size_t r=fread(b,1,n,f); b[r]=0; fclose(f); if(len)*len=r; return b; }
 static void write_file(const char*path,const char*data,size_t len){ FILE*f=fopen(path,"wb"); if(!f) die("nie mogę zapisać pliku wyjściowego"); fwrite(data,1,len,f); fclose(f); }
-static char* default_out(const char*movie,const char*explicit_out){ if(explicit_out){ char*d=xmalloc(strlen(explicit_out)+1); strcpy(d,explicit_out); return d; }
-    const char*dot=strrchr(movie,'.'); size_t base= dot? (size_t)(dot-movie):strlen(movie); char*d=xmalloc(base+5); memcpy(d,movie,base); strcpy(d+base,".srt"); return d; }
+
 static const char* basename_of(const char*p){ const char*s=strrchr(p,'/'); return s?s+1:p; }
+/* Nazwa pliku z wejścia (URL: część path bez query; lokalnie: basename) -> out. */
+static void input_basename(const char*path,char*out,size_t osz){
+    if(is_url(path)){
+        const char*q=strchr(path,'?'); size_t plen=q?(size_t)(q-path):strlen(path);
+        const char*sl=path; for(size_t i=0;i<plen;i++) if(path[i]=='/') sl=path+i+1;
+        size_t bl=plen-(size_t)(sl-path); if(bl>=osz) bl=osz-1; memcpy(out,sl,bl); out[bl]=0;
+    } else { snprintf(out,osz,"%s",basename_of(path)); }
+}
+/* Człon nazwy wyjściowej (bez ostatniego rozszerzenia) — malloc.
+ * Dla URL-a bierze nazwę pliku z URL-a (bieżący katalog), nie ścieżkę serwera. */
+static char* input_stem(const char*path){
+    char nb[512]; const char*nm;
+    if(is_url(path)){ input_basename(path,nb,sizeof nb); nm=nb; } else nm=path;
+    const char*dot=strrchr(nm,'.'); size_t base = dot? (size_t)(dot-nm):strlen(nm);
+    char*d=xmalloc(base+1); memcpy(d,nm,base); d[base]=0; return d; }
+
+static char* default_out(const char*movie,const char*explicit_out){ if(explicit_out){ char*d=xmalloc(strlen(explicit_out)+1); strcpy(d,explicit_out); return d; }
+    char*st=input_stem(movie); char*d=xmalloc(strlen(st)+5); sprintf(d,"%s.srt",st); free(st); return d; }
+
+/* Wczytaj całe wejście (URL http(s) lub plik lokalny). Bufor jest NUL-zakończony. */
+static char* read_input(const char*path,size_t*len){
+    if(is_url(path)){ size_t n=0; unsigned char*b=url_read_full(path,&n); if(!b) return NULL; if(len)*len=n; return (char*)b; }
+    return read_file(path,len);
+}
 
 /* ---------------------------------------------------------------- polecenia */
 static int cmd_hash(const char*path){
@@ -879,10 +943,11 @@ static int cmd_hash(const char*path){
     if(r==-1){ fprintf(stderr,"Błąd: plik za mały na hash OSH (min. %d B): %s\n",2*OSH_CHUNK,path); return 1; }
     if(r==-2){ fprintf(stderr,"Brak pliku: %s\n",path); return 1; }
     char md[33]; if(md5_10mb(path,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",path); return 1; }
+    char nm[512]; input_basename(path,nm,sizeof nm);
     printf("OSH (fh)        : %s\n",osh);
     printf("MD5-10MiB (md)  : %s\n",md);
-    printf("rozmiar         : %ld B\n",file_size(path));
-    printf("nazwa           : %s\n",basename_of(path));
+    printf("rozmiar         : %ld B\n",input_size(path));
+    printf("nazwa           : %s\n",nm);
     return 0;
 }
 static int cmd_fps(const char*path){ double f=fps_from_file(path);
@@ -910,7 +975,7 @@ static void apply_sync_c(Cues*in,double scale,double offset,Cues*out){ cues_init
         if(ns<0)ns=0; if(ne<0)ne=0; Cue*q=cues_push(out); q->start=ns; q->end=ne;
         for(int k=0;k<c->nlines;k++) cue_addline(q,c->lines[k],strlen(c->lines[k])); } }
 /* wczytaj + zdekoduj + sparsuj; błąd gdy 0 linii (jak _load_cues) */
-static void load_cues_c(const char*path,double fps,Cues*out){ size_t n; char*data=read_file(path,&n);
+static void load_cues_c(const char*path,double fps,Cues*out){ size_t n; char*data=read_input(path,&n);
     if(!data){ fprintf(stderr,"Brak pliku: %s\n",path); exit(1); }
     char*text=decode_text((unsigned char*)data,n); free(data); cues_init(out); parse_any(text,fps,out); free(text);
     if(out->n==0){ char m[512]; snprintf(m,sizeof m,"Nie rozpoznano napisów w pliku: %s",path); die(m); } }
@@ -922,7 +987,7 @@ static long parse_user_time(const char*s){ /* hh:mm:ss[,.]mmm | mm:ss | sekundy 
 static const char* ext_for(const char*fmt){ if(!strcmp(fmt,"vtt"))return"vtt"; if(!strcmp(fmt,"ass"))return"ass"; if(!strcmp(fmt,"microdvd"))return"sub"; return"srt"; }
 
 static int cmd_convert(const char*in,const char*out,const char*movie,double flag_fps,const char*fmt_flag,SanOpts opt){
-    size_t n; char*data=read_file(in,&n); if(!data){ fprintf(stderr,"Brak pliku: %s\n",in); return 1; }
+    size_t n; char*data=read_input(in,&n); if(!data){ fprintf(stderr,"Brak pliku: %s\n",in); return 1; }
     double fps=resolve_fps(movie,0,flag_fps);
     char*outp=default_out(in,out); const char*fmt=fmt_from_ext(outp,fmt_flag);
     SB o; sb_init(&o); SanReport rep; convert_bytes((unsigned char*)data,n,fps,fmt,&opt,&o,&rep); free(data);
@@ -978,7 +1043,7 @@ static int cmd_fpsconv(const char*in,const char*out,double from_fps,double to_fp
     Cues cues; load_cues_c(in,from_fps,&cues);
     double scale=from_fps/to_fps; Cues conv; apply_sync_c(&cues,scale,0,&conv);
     char defname[512]; char*outp; if(out){ outp=xmalloc(strlen(out)+1); strcpy(outp,out); }
-    else { const char*dot=strrchr(in,'.'); size_t b=dot?(size_t)(dot-in):strlen(in); snprintf(defname,sizeof defname,"%.*s.%gfps.srt",(int)b,in,to_fps); outp=xmalloc(strlen(defname)+1); strcpy(outp,defname); }
+    else { char*st=input_stem(in); snprintf(defname,sizeof defname,"%s.%gfps.srt",st,to_fps); free(st); outp=xmalloc(strlen(defname)+1); strcpy(outp,defname); }
     const char*fmt=fmt_from_ext(outp,fmt_flag); SB o; sb_init(&o); emit_subtitle(&conv,fmt,to_fps,&o); write_file(outp,o.b,o.len);
     printf("Przeliczono FPS %g -> %g (scale=%.5f): %s (%d linii)\n",from_fps,to_fps,scale,outp,conv.n);
     free(outp); free(o.b); return 0;
@@ -991,7 +1056,7 @@ static int cmd_merge(char**files,int nfiles,const char*out,double flag_fps,const
     for(int i=1;i<nfiles;i++){ Cues c; load_cues_c(files[i],fps,&c); long shift=(i-1<noff)?(long)py_round(offs[i-1]*1000):running_end;
         Cues sh; apply_sync_c(&c,1.0,shift,&sh); for(int k=0;k<sh.n;k++){ Cue*q=cues_push(&merged); *q=sh.a[k]; if(q->end>running_end) running_end=q->end; } }
     char defname[512]; char*outp; if(out){ outp=xmalloc(strlen(out)+1); strcpy(outp,out); }
-    else { const char*dot=strrchr(files[0],'.'); size_t b=dot?(size_t)(dot-files[0]):strlen(files[0]); snprintf(defname,sizeof defname,"%.*s.merged.srt",(int)b,files[0]); outp=xmalloc(strlen(defname)+1); strcpy(outp,defname); }
+    else { char*st=input_stem(files[0]); snprintf(defname,sizeof defname,"%s.merged.srt",st); free(st); outp=xmalloc(strlen(defname)+1); strcpy(outp,defname); }
     const char*fmt=fmt_from_ext(outp,fmt_flag); SB o; sb_init(&o); emit_subtitle(&merged,fmt,fps,&o); write_file(outp,o.b,o.len);
     printf("Połączono %d plików → %s (%d linii, format %s)\n",nfiles,outp,merged.n,fmt);
     free(outp); free(o.b); return 0;
@@ -1002,7 +1067,7 @@ static int cmd_split(const char*in,const char*out,char**at,int nat,int rebase,do
     long pts[64]; int npts=0; for(int i=0;i<nat&&i<64;i++){ long v=parse_user_time(at[i]); if(v<0){ char m[256]; snprintf(m,sizeof m,"Zły format --at '%s' (użyj hh:mm:ss,mmm lub sekund)",at[i]); die(m);} pts[npts++]=v; }
     for(int i=0;i<npts;i++) for(int j=i+1;j<npts;j++) if(pts[j]<pts[i]){ long t=pts[i];pts[i]=pts[j];pts[j]=t; }
     const char*fmt=fmt_flag?fmt_flag:"srt"; const char*ext=ext_for(fmt);
-    char base[512]; if(out) snprintf(base,sizeof base,"%s",out); else { const char*dot=strrchr(in,'.'); size_t b=dot?(size_t)(dot-in):strlen(in); snprintf(base,sizeof base,"%.*s",(int)b,in); }
+    char base[512]; if(out) snprintf(base,sizeof base,"%s",out); else { char*st=input_stem(in); snprintf(base,sizeof base,"%s",st); free(st); }
     int nparts=npts+1; SB names; sb_init(&names); int wrote=0;
     for(int p=0;p<nparts;p++){ Cues part; cues_init(&part);
         for(int i=0;i<cues.n;i++){ int idx=0; for(int k=0;k<npts;k++) if(cues.a[i].start>=pts[k]) idx=k+1; if(idx==p){ Cue*q=cues_push(&part); q->start=cues.a[i].start; q->end=cues.a[i].end; for(int k=0;k<cues.a[i].nlines;k++) cue_addline(q,cues.a[i].lines[k],strlen(cues.a[i].lines[k])); } }
@@ -1087,7 +1152,7 @@ static int cmd_sync(const char*ref,const char*tgt,const char*out,double off_sec,
         tc=work; scale=sc; offset=of; }
     Cues syn; apply_sync_c(&tc,scale,offset,&syn);
     char defname[512]; char*outp; if(out){ outp=xmalloc(strlen(out)+1); strcpy(outp,out); }
-    else { const char*dot=strrchr(tgt,'.'); size_t b=dot?(size_t)(dot-tgt):strlen(tgt); snprintf(defname,sizeof defname,"%.*s.synced.srt",(int)b,tgt); outp=xmalloc(strlen(defname)+1); strcpy(outp,defname); }
+    else { char*st=input_stem(tgt); snprintf(defname,sizeof defname,"%s.synced.srt",st); free(st); outp=xmalloc(strlen(defname)+1); strcpy(outp,defname); }
     SB o; sb_init(&o); emit_srt(&syn,&o); write_file(outp,o.b,o.len);
     printf("Zsynchronizowano: %s (%d linii)\n",outp,syn.n);
     printf("  transformacja: nowy = %.5f * stary + (%+.3f s)\n",scale,offset/1000.0);
@@ -1227,7 +1292,7 @@ static int cmd_np_upload(const char*cfgpath,const char*movie,const char*srt,cons
         snprintf(user,sizeof user,"%s",ini_get(&ini,1,"user")); snprintf(pass,sizeof pass,"%s",ini_get(&ini,1,"pass"));
         const char*eu=getenv("NAPI_USER"),*ep=getenv("NAPI_PASS"); if(eu&&*eu)snprintf(user,sizeof user,"%s",eu); if(ep&&*ep)snprintf(pass,sizeof pass,"%s",ep);
         if(!user[0]||!pass[0]){ fprintf(stderr,"Błąd uwierzytelnienia: Upload z logowaniem wymaga loginu i hasła.\n"); return 2; } }
-    size_t n; char*raw=read_file(srt,&n); if(!raw){ fprintf(stderr,"Brak pliku: %s\n",srt); return 1; }
+    size_t n; char*raw=read_input(srt,&n); if(!raw){ fprintf(stderr,"Brak pliku: %s\n",srt); return 1; }
     char*text=decode_text((unsigned char*)raw,n); free(raw); size_t sl=strlen(text);
     char md[33]; if(md5_10mb(movie,md)!=0){ fprintf(stderr,"Brak pliku: %s\n",movie); free(text); return 1; }
     char L[8]; snprintf(L,sizeof L,"%s",lang?lang:"PL"); for(char*p=L;*p;p++)*p=toupper((unsigned char)*p);
@@ -1260,6 +1325,8 @@ static void cookie_set(const char*nv){ /* nv = "name=value" (bez atrybutów) */
 static void cookie_capture(const char*hdrs){ for(const char*p=hdrs;*p;p++){ if((p==hdrs||p[-1]=='\n')&&!strncasecmp(p,"set-cookie:",11)){
     const char*v=p+11; while(*v==' ')v++; const char*e=v; while(*e&&*e!=';'&&*e!='\r'&&*e!='\n')e++; size_t l=e-v; char nv[512]; if(l>=sizeof nv)l=sizeof nv-1; memcpy(nv,v,l); nv[l]=0; if(strchr(nv,'=')) cookie_set(nv); } } }
 
+/* Rozmiar ostatniego zasobu HTTPS (z Content-Range/Content-Length); -1 = nieznany. */
+static long g_http_total=-1;
 /* GET/POST po HTTPS; obsługa chunked, przekierowań i cookies. Zwraca ciało (malloc). */
 static char* https_fetch(const char*method,const char*host,const char*path,
                          const char*extra_hdrs,const char*post,int*status,size_t*outlen,int depth){
@@ -1299,6 +1366,10 @@ static char* https_fetch(const char*method,const char*host,const char*path,
       char*he=strstr(resp.b,"\r\n\r\n"); if(!he){ free(resp.b); goto done; }
       *he=0; char*hdrs=resp.b; char*bodyp=he+4; size_t blen=resp.len-(bodyp-resp.b);
       if(g_cookies_on) cookie_capture(hdrs);
+      /* rozmiar zasobu: Content-Range ".../N" ma pierwszeństwo, wpp. Content-Length */
+      g_http_total=-1;
+      for(char*p=hdrs;*p;p++){ if((p==hdrs||p[-1]=='\n')&&!strncasecmp(p,"content-range:",14)){ char*sl=strchr(p,'/'); if(sl) g_http_total=strtol(sl+1,NULL,10); break; } }
+      if(g_http_total<0) for(char*p=hdrs;*p;p++){ if((p==hdrs||p[-1]=='\n')&&!strncasecmp(p,"content-length:",15)){ g_http_total=strtol(p+15,NULL,10); break; } }
       if(st>=300&&st<400){ /* przekierowanie */
           char*loc=NULL; for(char*p=hdrs;*p;p++) if((p==hdrs||p[-1]=='\n')&&!strncasecmp(p,"location:",9)){ loc=p+9; break; }
           if(loc){ while(*loc==' ')loc++; char url[1024]; size_t i=0; while(loc[i]&&loc[i]!='\r'&&loc[i]!='\n'&&i<sizeof url-1){ url[i]=loc[i]; i++; } url[i]=0;
@@ -1444,7 +1515,7 @@ static unsigned char* n24_normalize_crlf(const char*text,size_t*outlen){
 typedef struct { const char*imdb,*title,*title_pl,*year,*release,*translator,*sync,*proof,*resolution,*duration,*size,*fps,*season,*episode,*episode_title; } N24Meta;
 static int cmd_n24_upload(const char*cfgpath,const char*srt,const N24Meta*m,int dry){
     if(!srt){ fprintf(stderr,"napisy24 upload wymaga --srt\n"); return 2; }
-    size_t rn; char*raw=read_file(srt,&rn); if(!raw){ fprintf(stderr,"Brak pliku: %s\n",srt); return 1; }
+    size_t rn; char*raw=read_input(srt,&rn); if(!raw){ fprintf(stderr,"Brak pliku: %s\n",srt); return 1; }
     char*text=decode_text((unsigned char*)raw,rn); free(raw);
     char prob[128]; int probs=n24_check_srt(text,prob,sizeof prob);
     if(probs){ fprintf(stderr,"Plik nie przejdzie walidacji Napisy24:\n  %s\n",prob); free(text); return 1; }
@@ -1462,7 +1533,7 @@ static int cmd_n24_upload(const char*cfgpath,const char*srt,const N24Meta*m,int 
     FT("form[form_dodaj_jezyk][]","Polski"); FT("form[form_dodajIloscPlyt]","1");
     FT("form[form_czas_cd1]",m->duration); FT("form[form_wielkosc_cd1]",m->size);
     /* plik napisów + 3 puste sloty */
-    { const char*fn=basename_of(srt); sb_puts(&b,"--");sb_puts(&b,bnd);sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"form[form_dodajNapis1_plik]\"; filename=\"");sb_puts(&b,fn);sb_puts(&b,"\"\r\nContent-Type: application/octet-stream\r\n\r\n");sb_putn(&b,(char*)fb,fl);sb_puts(&b,"\r\n"); }
+    { char fn[512]; input_basename(srt,fn,sizeof fn); sb_puts(&b,"--");sb_puts(&b,bnd);sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"form[form_dodajNapis1_plik]\"; filename=\"");sb_puts(&b,fn);sb_puts(&b,"\"\r\nContent-Type: application/octet-stream\r\n\r\n");sb_putn(&b,(char*)fb,fl);sb_puts(&b,"\r\n"); }
     for(int i=2;i<=4;i++){ char nm[48]; snprintf(nm,sizeof nm,"form[form_dodajNapis%d_plik]",i); sb_puts(&b,"--");sb_puts(&b,bnd);sb_puts(&b,"\r\nContent-Disposition: form-data; name=\"");sb_puts(&b,nm);sb_puts(&b,"\"; filename=\"\"\r\nContent-Type: application/octet-stream\r\n\r\n\r\n"); }
     FT("form[dodajTlumaczenie]","Dodaj"); FT("form[formId]","7"); FT("form[remId]",""); FT("form[form_dodajTlumaczenieId]","0");
     if(serial){ FT("form[realtxt]",m->title); FT("form[serial][]",m->imdb); FT("form[form_dodaj_nrSezonu]",m->season); FT("form[form_dodaj_nrOdcinka]",m->episode); FT("form[form_dodaj_tytulOdcinka]",m->episode_title); FT("form[form_dodaj_cover]","Serialu"); }
@@ -1485,6 +1556,96 @@ static int cmd_n24_delete(const char*cfgpath,const char*id,const char*reason){
     printf("[%s] %s\n", ok?"OK":"BŁĄD", ok?"usunięto":"nie potwierdzono usunięcia"); return ok?0:1;
 }
 #endif /* AQNAPI_TLS */
+
+/* ----------------------------------------------------------- URL jako wejście
+ * Pobieranie zakresowe (Range) — tylko potrzebne fragmenty, minimalna pamięć.
+ * https wymaga wariantu TLS; http działa w obu buildach. */
+/* Wyszukiwanie podłańcucha bez rozróżniania wielkości liter (bez zależności GNU). */
+static const char* ci_strstr(const char*hay,const char*need){ size_t nl=strlen(need);
+    for(const char*p=hay;*p;p++){ size_t i=0; while(i<nl && p[i] && tolower((unsigned char)p[i])==tolower((unsigned char)need[i])) i++; if(i==nl) return p; } return NULL; }
+static void url_pct_decode(const char*s,char*out,size_t osz){ size_t o=0;
+    for(size_t i=0;s[i]&&o+1<osz;i++){ if(s[i]=='%'&&isxdigit((unsigned char)s[i+1])&&isxdigit((unsigned char)s[i+2])){
+            char h[3]={s[i+1],s[i+2],0}; out[o++]=(char)strtol(h,NULL,16); i+=2; } else out[o++]=s[i]; }
+    out[o]=0; }
+/* Rozbij URL na części; zbuduj nagłówek Basic auth z user:pass@. Zwraca 1 OK. */
+static int url_parse(const char*url,int*is_https,char*authhdr,size_t ahsz,
+                     char*host,size_t hsz,char*port,size_t psz,char*path,size_t pathsz){
+    const char*p; authhdr[0]=0;
+    if(!strncmp(url,"https://",8)){ *is_https=1; p=url+8; snprintf(port,psz,"443"); }
+    else if(!strncmp(url,"http://",7)){ *is_https=0; p=url+7; snprintf(port,psz,"80"); }
+    else return 0;
+    const char*slash=p; while(*slash && *slash!='/') slash++;
+    char auth[512]; size_t al=(size_t)(slash-p); if(al>=sizeof auth) al=sizeof auth-1; memcpy(auth,p,al); auth[al]=0;
+    char*at=strrchr(auth,'@'); char*hp=auth;
+    if(at){ *at=0; char ui[512]; char dec[512]; url_pct_decode(auth,dec,sizeof dec);
+        if(strchr(dec,':')) snprintf(ui,sizeof ui,"%s",dec); else snprintf(ui,sizeof ui,"%s:",dec);
+        char*tok=b64encode((const unsigned char*)ui,strlen(ui)); snprintf(authhdr,ahsz,"Authorization: Basic %s\r\n",tok); free(tok);
+        hp=at+1; }
+    char*colon=strrchr(hp,':'); if(colon){ *colon=0; snprintf(port,psz,"%s",colon+1); }
+    snprintf(host,hsz,"%s",hp);
+    if(*slash) snprintf(path,pathsz,"%s",slash); else snprintf(path,pathsz,"/");
+    return 1;
+}
+/* Zwykły HTTP/1.1 GET/HEAD z parsowaniem statusu, rozmiaru i chunked. */
+static char* url_http_req(const char*method,const char*host,const char*port,const char*path,
+                          const char*extra,size_t*outlen,int*status,long*total){
+    struct addrinfo hints,*res=NULL; memset(&hints,0,sizeof hints); hints.ai_family=AF_UNSPEC; hints.ai_socktype=SOCK_STREAM;
+    if(getaddrinfo(host,port,&hints,&res)!=0) return NULL;
+    int fd=-1; for(struct addrinfo*a=res;a;a=a->ai_next){ fd=socket(a->ai_family,a->ai_socktype,a->ai_protocol); if(fd<0)continue; if(connect(fd,a->ai_addr,a->ai_addrlen)==0)break; close(fd); fd=-1; }
+    freeaddrinfo(res); if(fd<0) return NULL;
+    SB req; sb_init(&req); char h[1200];
+    snprintf(h,sizeof h,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: aqnapi v%s\r\nAccept: */*\r\n",method,path,host,VERSION);
+    sb_puts(&req,h); if(extra) sb_puts(&req,extra); sb_puts(&req,"Connection: close\r\n\r\n");
+    size_t off=0; while(off<req.len){ ssize_t w=write(fd,req.b+off,req.len-off); if(w<=0){ close(fd); free(req.b); return NULL; } off+=w; }
+    free(req.b);
+    SB resp; sb_init(&resp); char buf[8192]; ssize_t r; while((r=read(fd,buf,sizeof buf))>0) sb_putn(&resp,buf,(size_t)r); close(fd);
+    if(!resp.b){ return NULL; }
+    int st=0; sscanf(resp.b,"HTTP/1.%*d %d",&st);
+    char*he=strstr(resp.b,"\r\n\r\n"); if(!he){ free(resp.b); return NULL; }
+    *he=0; char*hdrs=resp.b; char*bodyp=he+4; size_t blen=resp.len-(size_t)(bodyp-resp.b);
+    long tot=-1; for(char*q=hdrs;*q;q++){ if((q==hdrs||q[-1]=='\n')&&!strncasecmp(q,"content-range:",14)){ char*sl=strchr(q,'/'); if(sl) tot=strtol(sl+1,NULL,10); break; } }
+    if(tot<0) for(char*q=hdrs;*q;q++){ if((q==hdrs||q[-1]=='\n')&&!strncasecmp(q,"content-length:",15)){ tot=strtol(q+15,NULL,10); break; } }
+    int chunked=0; for(char*q=hdrs;*q;q++) if((q==hdrs||q[-1]=='\n')&&!strncasecmp(q,"transfer-encoding:",18)&&ci_strstr(q,"chunked")) chunked=1;
+    SB out; sb_init(&out);
+    if(chunked){ char*q=bodyp; size_t left=blen; while(left>0){ char*eol=memchr(q,'\n',left); if(!eol)break; long csz=strtol(q,NULL,16); size_t adv=(size_t)(eol-q)+1; q+=adv; left-=adv; if(csz<=0)break; if((size_t)csz>left)csz=left; sb_putn(&out,q,(size_t)csz); q+=csz; left-=(size_t)csz; if(left>=2){q+=2;left-=2;} } }
+    else sb_putn(&out,bodyp,blen);
+    sb_putc(&out,0); size_t bl=out.len-1; /* NUL-terminacja bez liczenia */
+    if(status)*status=st; if(total)*total=tot; if(outlen)*outlen=bl;
+    char*b=out.b; free(resp.b); return b;
+}
+/* Uniwersalny fetch (GET/HEAD) po http lub https, z nagłówkiem Range. */
+static char* url_fetch(const char*method,const char*url,const char*rangehdr,size_t*outlen,int*status,long*total){
+    int https; char authhdr[600],host[256],port[8],path[2048];
+    if(!url_parse(url,&https,authhdr,sizeof authhdr,host,sizeof host,port,sizeof port,path,sizeof path)){ fprintf(stderr,"Zły URL: %s\n",url); return NULL; }
+    char extra[900]; snprintf(extra,sizeof extra,"%s%s",authhdr,rangehdr?rangehdr:"");
+    if(https){
+#ifdef AQNAPI_TLS
+        int st=0; size_t n=0; char*b=https_fetch(method,host,path,extra[0]?extra:NULL,NULL,&st,&n,0);
+        if(status)*status=st; if(outlen)*outlen=n; if(total)*total=g_http_total; return b;
+#else
+        fprintf(stderr,"URL https wymaga wariantu TLS (aqnapi-c-tls.com): %s\n",url); return NULL;
+#endif
+    }
+    return url_http_req(method,host,port,path,extra[0]?extra:NULL,outlen,status,total);
+}
+static long url_size(const char*url){
+    int st=0; size_t n=0; long tot=-1; char*b=url_fetch("HEAD",url,NULL,&n,&st,&tot); free(b);
+    if(tot<0){ /* fallback: GET Range 0-0 */ b=url_fetch("GET",url,"Range: bytes=0-0\r\n",&n,&st,&tot); free(b); }
+    if(tot<0) fprintf(stderr,"Serwer nie podał rozmiaru zasobu: %s\n",url);
+    return tot;
+}
+static unsigned char* url_read_range(const char*url,long start,long length,size_t*outlen){
+    char rh[64]; snprintf(rh,sizeof rh,"Range: bytes=%ld-%ld\r\n",start,start+length-1);
+    int st=0; size_t n=0; char*b=url_fetch("GET",url,rh,&n,&st,NULL); if(!b) return NULL;
+    if(start>0 && st!=206){ fprintf(stderr,"Serwer nie wspiera żądań zakresowych (Range) — HTTP %d: %s\n",st,url); free(b); return NULL; }
+    if(outlen)*outlen = n<(size_t)length ? n : (size_t)length;
+    return (unsigned char*)b;
+}
+static unsigned char* url_read_full(const char*url,size_t*outlen){
+    int st=0; size_t n=0; char*b=url_fetch("GET",url,NULL,&n,&st,NULL); if(!b) return NULL;
+    if(st>=400){ fprintf(stderr,"Pobranie URL nieudane (HTTP %d): %s\n",st,url); free(b); return NULL; }
+    if(outlen)*outlen=n; return (unsigned char*)b;
+}
 
 static int cmd_update(int check){
 #ifdef AQNAPI_TLS
