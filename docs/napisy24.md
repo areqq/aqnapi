@@ -228,8 +228,42 @@ wielkimi literami. Liczony na re-kodowanych przez klienta bajtach srt.
 > dokładne żądanie, dostaje `Problem: Masz Stara wersje programu!`. Ponowne
 > wysłanie poprawnego żądania z dowolnym `postVer` (v2.0.0, v3.0.0, v1.100.0, …)
 > daje ten sam wynik — to nie jest kontrola numeru wersji; serwer odrzuca
-> *wszystkie* uploady klienta tym komunikatem. **Napisy dodaje się zamiast tego
-> przez formularz WWW — patrz [Dodawanie napisów przez stronę WWW](#dodawanie-napisów-przez-stronę-www-dodaj-napisy).**
+> *wszystkie* uploady klienta tym komunikatem. **Blokada dotyczy TYLKO tego
+> endpointu** — działa druga ścieżka klienta `AddSubPrg.php` (niżej) oraz
+> formularz WWW.
+
+### `AddSubPrg.php` — upload przez API klienta *(DZIAŁA)* — powiązanie po haszu
+
+Druga, **działająca** ścieżka uploadu klienta („Dodaj napisy (tylko do
+programu)"). W przeciwieństwie do `AddSub.php` **nie jest wersjonowana** — działa
+z `postVer=v1.99.1`. Odtworzona z dekompilacji funkcji `0xb1bed0–0xb1d1ee`.
+Dwie fazy, obie `POST /run/AddSubPrg.php` (multipart, każda część z
+`Content-Transfer-Encoding: 8bit`). Pola `login, pass, hm, md, hs, fs, tm, dm,
+fp, im` są **zaciemniane** (`obf`, jak CheckSub2); `postAction, postVer, fn` są
+jawne (fn: `charset=utf-8`); `sf` to surowy plik `.srt`.
+
+| pole | znaczenie |
+|------|-----------|
+| `hm` | hasz OpenSubtitles filmu (16 hex **WIELKIE**) |
+| `md` | MD5 pierwszych 10 MiB filmu |
+| `hs` | hasz napisów: `rozmiar + Σ(wszystkie 8B słowa LE) mod 2^64`, 16 hex WIELKIE |
+| `fs` | rozmiar filmu w bajtach |
+| `tm` / `dm` / `fp` | czas `HH:MM:SS` / rozdzielczość `WxH` / fps (opcjonalne) |
+| `im` | IMDb `ttNNNNNNN` — **tylko** gdy niepuste i ≠ `0` |
+| `fn` | nazwa pliku filmowego (jawna, utf-8) |
+| `sf` | sam plik `.srt` (część plikowa; tylko w fazie Send przy `OK-0`) |
+
+- **Faza 1 — `postAction=Check`** (read-only): `postVer, login, pass, hm, md, hs,
+  fs [, im]` → `OK-0` nowe (Send musi dołączyć plik `sf`) · `OK-1` film znany
+  (Send bez pliku — samo powiązanie) · `OK-2` duplikat (stop).
+- **Faza 2 — `postAction=Send`**: te same pola + `tm, dm, fp, fn [, sf]` →
+  `OK` = „Dziekujemy - napisy dodane do naszej bazy".
+
+Efekt: napisy **powiązane po haszu filmu** — znajduje je `download` i oficjalny
+program, ale **nie** powstaje publiczny wpis w serwisie. Zły login/hasło →
+`Podałeś zły login lub hasło!` (autoryzacja realna). W `aqnapi`:
+`napisy24 attach --movie … --srt … [--imdb tt..] [--check-only]` (sama faza Check
+jest bezpieczna, nic nie wysyła).
 
 ### `ChangeData.php` — powiąż lokalny plik z filmem / zaktualizuj media info
 
@@ -262,7 +296,6 @@ znanych nazw wydań dla tytułu (np. `720p.HDTV.X264-DIMENSION`, `HDTV.XviD-FUM`
 
 ### Pozostałe endpointy (zaobserwowane, niezaimplementowane)
 
-`AddSubPrg.php` (kontrola duplikatów przed uploadem, `postAction=Check`),
 `ChangeData.php` (edycja/ocena), `SetTrans.php` / `GetTrans.php` (tłumaczenia),
 `GetIMDB.php`, `Notifiemail.php` / `NotifiSMS.php` (powiadomienia), `SMS.php`,
 `links.php` (aktualizator), `ShowInfo.php` (strona info WWW).

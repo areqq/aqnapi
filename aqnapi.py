@@ -38,7 +38,7 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 USER_AGENT_OS = f"aqnapi v{__version__}"
 
 __all__ = [
@@ -177,6 +177,17 @@ def file_md5(path: str) -> str:
 def bytes_md5(data: bytes) -> str:
     """MD5 bajtów w pamięci."""
     return hashlib.md5(data).hexdigest()
+
+
+def subtitle_hash(data: bytes) -> str:
+    """Hash napisów Napisy24 (pole `hs`, klient `form_hashsub_cd1`): rozmiar +
+    suma WSZYSTKICH pełnych 8-bajtowych słów little-endian; 16 znaków hex WIELKIE."""
+    mask = 0xFFFFFFFFFFFFFFFF
+    h = len(data) & mask
+    n = (len(data) // 8) * 8
+    for i in range(0, n, 8):
+        h = (h + struct.unpack_from("<Q", data, i)[0]) & mask
+    return "%016X" % h
 
 
 def file_hashes(path: str) -> Dict[str, object]:
@@ -1748,6 +1759,90 @@ class Napisy24Client:
         }
         body = self._multipart_run("CheckSub2.php", fields)
         return self._parse_checksub(body)
+
+    # ---- attach: AddSubPrg.php (działająca ścieżka API klienta) ----
+    # Dwufazowy protokół "Dodaj napisy (tylko do programu)": Check (read-only) →
+    # Send. Wynik to napisy powiązane PO HASZU filmu — znajduje je `download` i
+    # oficjalny program, ale NIE tworzą publicznego wpisu w serwisie. Pola
+    # login/pass/hm/md/hs/fs/tm/dm/fp/im są zaciemniane (n24_obf), fn jest jawne
+    # (utf-8), sf to surowy plik .srt. Endpoint NIE jest wersjonowany (działa
+    # z postVer=v1.99.1), inaczej niż zablokowany AddSub.php.
+
+    def _multipart_prg(self, fields: List[Tuple], files: Tuple = ()) -> str:
+        boundary = "----aqnapiprg000001"
+        body = bytearray()
+        for name, value, charset in fields:
+            body += ("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n"
+                     % (boundary, name)).encode()
+            if charset:
+                body += ("Content-Type: text/plain; charset=%s\r\n" % charset).encode()
+            body += b"Content-Transfer-Encoding: 8bit\r\n\r\n"
+            body += value if isinstance(value, bytes) else value.encode("utf-8")
+            body += b"\r\n"
+        for name, filename, ctype, payload in files:
+            body += ("--%s\r\nContent-Disposition: form-data; name=\"%s\"; "
+                     "filename=\"%s\"\r\nContent-Type: %s\r\n"
+                     "Content-Transfer-Encoding: 8bit\r\n\r\n"
+                     % (boundary, name, filename, ctype)).encode()
+            body += payload + b"\r\n"
+        body += ("--%s--\r\n" % boundary).encode()
+        ct = "multipart/form-data; boundary=" + boundary
+        raw = raw_http10_post(self.HOST, "/run/AddSubPrg.php", ct, bytes(body),
+                              user_agent="Mozilla/4.0", timeout=self.timeout)
+        return raw.decode("utf-8", errors="replace").strip()
+
+    def _prg_common(self, login, password, hashes, sub_hash) -> List[Tuple]:
+        return [("postVer", self.CLIENT_VER, None),
+                ("login", n24_obf(login), None),
+                ("pass", n24_obf(password), None),
+                ("hm", n24_obf(str(hashes["osh"]).upper()), None),
+                ("md", n24_obf(str(hashes["md5_10mb"])), None),
+                ("hs", n24_obf(sub_hash), None),
+                ("fs", n24_obf(str(hashes["size"])), None)]
+
+    def prg_check(self, login, password, hashes, sub_hash, imdb="") -> str:
+        """Faza 1 (read-only). Zwraca werdykt: OK-0 nowe / OK-1 film znany /
+        OK-2 duplikat / komunikat błędu."""
+        fields = [("postAction", "Check", None)] + self._prg_common(login, password, hashes, sub_hash)
+        if imdb and _norm_imdb(imdb) != "0":
+            fields.append(("im", n24_obf(_norm_imdb(imdb)), None))
+        return self._multipart_prg(fields)
+
+    def prg_send(self, login, password, hashes, sub_hash, srt_bytes, srt_name,
+                 duration="", resolution="", fps="", imdb="", attach_file=True) -> str:
+        """Faza 2. Zwraca odpowiedź serwera ("OK" przy sukcesie)."""
+        fields = [("postAction", "Send", None)] + self._prg_common(login, password, hashes, sub_hash)
+        fields += [("tm", n24_obf(duration), None),
+                   ("dm", n24_obf(resolution), None),
+                   ("fp", n24_obf(fps), None)]
+        if imdb and _norm_imdb(imdb) != "0":
+            fields.append(("im", n24_obf(_norm_imdb(imdb)), None))
+        fields.append(("fn", str(hashes["name"]), "utf-8"))
+        files = (("sf", srt_name, "text/plain", srt_bytes),) if attach_file else ()
+        return self._multipart_prg(fields, files)
+
+    def attach(self, login, password, movie_path, srt_bytes, srt_name, imdb="",
+               duration="", resolution="", fps="", check_only=False) -> UploadResult:
+        """Pełny przepływ AddSubPrg (Check → Send). `movie_path` może być URL-em
+        (hash liczony zakresowo). Bez `fps` — dobierany z pliku filmowego."""
+        hashes = file_hashes(movie_path)
+        sub_h = subtitle_hash(srt_bytes)
+        verdict = self.prg_check(login, password, hashes, sub_h, imdb)
+        if verdict.startswith("OK-2"):
+            return UploadResult("napisy24", False, "napisy już w bazie (duplikat): " + verdict, verdict)
+        if not verdict.startswith(("OK-0", "OK-1")):
+            return UploadResult("napisy24", False, "serwer odrzucił fazę Check: " + verdict, verdict)
+        if check_only:
+            hint = {"OK-0": "nowe", "OK-1": "film znany"}.get(verdict[:4], verdict[:4])
+            return UploadResult("napisy24", True, "check-only (%s = %s): nic nie wysłano" % (verdict, hint), verdict)
+        if not fps:
+            f = fps_from_file(movie_path)
+            if f:
+                fps = "%.3f" % f
+        resp = self.prg_send(login, password, hashes, sub_h, srt_bytes, srt_name,
+                             duration, resolution, fps, imdb,
+                             attach_file=verdict.startswith("OK-0"))
+        return UploadResult("napisy24", resp.startswith("OK"), "%s | %s" % (verdict, resp), resp)
 
     def search(self, imdb: str = "", title: str = "") -> List[SubtitleHit]:
         """webapi.php — wyszukiwanie po IMDB lub tytule (XML, bez obf)."""
@@ -3373,6 +3468,21 @@ def cmd_n24(args, cfg):
         r = _n24_upload(args, cfg, decode_text(read_input_bytes(args.srt)))
         print(f"[{'OK' if r.ok else 'BŁĄD'}] {r.message}")
         return 0 if r.ok else 1
+    if args.n24_cmd == "attach":
+        login, password = cfg.n24_login(args.n24_user), cfg.n24_pass(args.n24_pass)
+        if not login or not password:
+            raise AuthError("napisy24 attach wymaga loginu i hasła (konfiguracja [napisy24] lub -u/-p)")
+        srt = read_input_bytes(args.srt)
+        srt_name = os.path.basename(
+            urllib.parse.urlsplit(args.srt).path if is_url(args.srt) else args.srt)
+        r = client.attach(login, password, args.movie, srt, srt_name or "napisy.srt",
+                          imdb=args.imdb or "", duration=args.duration or "",
+                          resolution=args.resolution or "", fps=(("%g" % args.fps) if args.fps else ""),
+                          check_only=args.check_only)
+        print(f"[{'OK' if r.ok else 'BŁĄD'}] {r.message}")
+        if args.check_only:
+            print("(faza Check, read-only: OK-0 = nowe, OK-1 = film znany, OK-2 = duplikat)")
+        return 0 if r.ok else 1
     if args.n24_cmd == "delete":
         login, password = cfg.n24_login(args.n24_user), cfg.n24_pass(args.n24_pass)
         opener = client._web_opener()
@@ -3652,6 +3762,16 @@ def build_parser() -> argparse.ArgumentParser:
     xu.add_argument("--comment"); xu.add_argument("--fix-timing", action="store_true", dest="fix_timing")
     xu.add_argument("--dry-run", action="store_true", dest="dry_run"); add_creds(xu)
     xrm = ns.add_parser("delete", aliases=["rm"]); xrm.add_argument("id"); add_creds(xrm)
+    xa = ns.add_parser("attach", help="dodaj napisy przez API klienta (AddSubPrg.php; powiązanie po haszu, bez wpisu publicznego)")
+    xa.add_argument("--movie", required=True, help="plik filmowy (lub URL) — hasz + rozmiar")
+    xa.add_argument("--srt", required=True, help="plik napisów (lub URL)")
+    xa.add_argument("--imdb", help="ID IMDB (opcjonalnie; wysyłane jako pole im)")
+    xa.add_argument("--duration", help="czas HH:MM:SS (opcjonalnie)")
+    xa.add_argument("--resolution", help="rozdzielczość WxH (opcjonalnie)")
+    xa.add_argument("--fps", type=float, help="FPS (domyślnie z pliku filmowego)")
+    xa.add_argument("--check-only", action="store_true", dest="check_only",
+                    help="tylko faza Check (read-only) — nic nie wysyła")
+    add_creds(xa)
     n.set_defaults(func=cmd_n24)
 
     # ---- per-serwis: napiprojekt ----

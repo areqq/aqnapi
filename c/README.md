@@ -32,6 +32,7 @@ zakresie, który obejmuje.
 | `napisy24 download` (CheckSubAgent+ZIP) / `getid` (download.php+ZIP) | **plik+stdout bajtowo** (ZIP-inflate przez zlib) |
 | `napiprojekt upload` (mode=512/1024, **7z-AES**, `--login`) | własny AES-256+SHA-256+kontener 7z; **archiwum rozpakowywalne przez `7z x`**; `--login` → pola `user_nick`/`user_password` (upload przypisany do konta); odpowiedź serwera == Python |
 | **URL http(s) jako wejście** (`--movie`/`--srt`/`input`/…) | pobieranie **zakresowe** (HTTP Range): md5-10MiB → 10 MiB, OSH → rozmiar+2×64 KiB, FPS → prefiks 8 MiB (`fmemopen`), napisy → całość; Basic auth z `user:pass@`. **http w obu buildach; https tylko w wariancie TLS.** Hash 1.7 GB filmu bajtowo == Python (live, https) |
+| `napisy24 attach` (**AddSubPrg.php**, `--check-only`) | działająca ścieżka API klienta, **plain HTTP → oba buildy**. Dwufazowo Check→Send, pola zaciemniane (`n24_obf`), `hs`=`subtitle_hash`. Powiązanie po haszu, bez wpisu publicznego. Werdykt Check bajtowo == Python (live: OK-2 https, OK-0 lokalnie) |
 
 Własna kryptografia zweryfikowana: **AES-256 (wektor FIPS-197)**, **SHA-256**,
 oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`).

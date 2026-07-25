@@ -260,7 +260,12 @@ aqnapi napiprojekt upload --srt film.srt --movie film.mkv --login
 # napiprojekt: poprawki (mode=1024)
 aqnapi napiprojekt upload --srt film.srt --movie film.mkv --corrected --comment "lepsza synchronizacja"
 
-# napisy24: upload do filmu przez formularz WWW
+# napisy24: attach przez API klienta (AddSubPrg.php) — powiązanie po haszu filmu,
+# BEZ wpisu publicznego. --check-only to sama faza Check (read-only, nic nie wysyła).
+aqnapi napisy24 attach --movie film.mkv --srt film.srt --imdb tt8080122 --check-only
+aqnapi napisy24 attach --movie film.mkv --srt film.srt --imdb tt8080122
+
+# napisy24: upload do filmu przez formularz WWW (tworzy PUBLICZNY wpis)
 aqnapi napisy24 upload --srt film.srt --movie film.mkv --imdb tt1757678 \
     --release XviD-ORPHEUS --translator ja --resolution 1920x1080 --duration 02:10:00
 
