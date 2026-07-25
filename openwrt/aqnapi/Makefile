@@ -1,33 +1,32 @@
 #
 # Formuła pakietu OpenWrt dla aqnapi (natywna wersja C).
+# Buduje z LOKALNEGO checkoutu repo (bez pobierania z sieci ani sum kontrolnych) —
+# feed zawiera całe repo, więc kompilujemy c/aqnapi.c bezpośrednio. Dzięki temu
+# ta sama formuła działa i w gh-action-sdk (CI), i przy lokalnym feedzie src-link.
+#
 # Jedna definicja pakietu — SDK produkuje .ipk LUB .apk zależnie od wersji
 # OpenWrt / CONFIG_USE_APK (patrz openwrt/README.md).
 #
 # Domyślnie build Z TLS (HTTPS: OpenSubtitles, napisy24 WWW/edit/delete, update,
 # URL https://) — zależy od libmbedtls. Wariant bez TLS: odznacz w menuconfig
-# "Enable HTTPS/TLS (mbedtls)" (Config/aqnapi niżej).
+# "Enable HTTPS/TLS (mbedtls)".
 #
 # Copyright (C) 2026 aqnapi contributors — MIT
 #
 
+# Ścieżka do katalogu źródła (c/) rozwiązana względem tej formuły — MUSI być
+# policzona PRZED include rules.mk (potem $(MAKEFILE_LIST) wskazuje inne pliki).
+# $(realpath) rozwiązuje symlinki feeda i sekwencje "..".
+AQNAPI_SRC:=$(realpath $(dir $(lastword $(MAKEFILE_LIST)))/../../c)
+
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=aqnapi
-PKG_VERSION:=1.0.15
+PKG_VERSION:=1.0.16
 PKG_RELEASE:=1
-
-# Źródło: klon taga vX.Y.Z z GitHuba (c/aqnapi.c ląduje w $(PKG_BUILD_DIR)/c/).
-PKG_SOURCE_PROTO:=git
-PKG_SOURCE_URL:=https://github.com/areqq/aqnapi.git
-PKG_SOURCE_VERSION:=v$(PKG_VERSION)
-PKG_MIRROR_HASH:=skip
-# ^ Zamień "skip" na realny sha256, aby włączyć weryfikację (odtwarzalny build):
-#     make package/aqnapi/download V=s
-#     sha256sum dl/aqnapi-*.tar.*
 
 PKG_MAINTAINER:=aqnapi <adm@hycom.pl>
 PKG_LICENSE:=MIT
-PKG_LICENSE_FILES:=LICENSE
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -61,6 +60,12 @@ define Package/aqnapi/description
   napisy24 WWW/edit/delete, self-update i adresy https://.
 endef
 
+# Źródło z lokalnego checkoutu — nadpisujemy domyślny unpack (nie ma PKG_SOURCE).
+define Build/Prepare
+	mkdir -p $(PKG_BUILD_DIR)
+	$(CP) $(AQNAPI_SRC)/aqnapi.c $(PKG_BUILD_DIR)/aqnapi.c
+endef
+
 TLS_FLAGS:=
 TLS_LIBS:=
 ifeq ($(CONFIG_AQNAPI_TLS),y)
@@ -68,10 +73,9 @@ ifeq ($(CONFIG_AQNAPI_TLS),y)
   TLS_LIBS:=-lmbedtls -lmbedx509 -lmbedcrypto
 endif
 
-# Pojedynczy plik C — kompilujemy bezpośrednio toolchainem OpenWrt.
 define Build/Compile
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_CPPFLAGS) -O2 -std=gnu11 $(TLS_FLAGS) \
-		-o $(PKG_BUILD_DIR)/aqnapi $(PKG_BUILD_DIR)/c/aqnapi.c \
+		-o $(PKG_BUILD_DIR)/aqnapi $(PKG_BUILD_DIR)/aqnapi.c \
 		$(TARGET_LDFLAGS) $(TLS_LIBS) -lz -lm
 endef
 

@@ -35,7 +35,7 @@
 #include <zlib.h>
 #endif
 
-#define VERSION "1.0.15"
+#define VERSION "1.0.16"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
