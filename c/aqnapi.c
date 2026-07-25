@@ -11,9 +11,15 @@
  *
  * Pokrywa 100% poleceń Pythona (parytet bajtowy dla zaimplementowanego zakresu).
  */
+/* _GNU_SOURCE: fmemopen, strcasestr, strdup, strtok_r na glibc/musl (poza cosmo).
+ * Cosmopolitan dostarcza je bez tego makra — ale zdefiniowanie nie szkodzi. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strcasecmp/strncasecmp (POSIX) */
 #include <stdint.h>
 #include <ctype.h>
 #include <sys/stat.h>
@@ -22,9 +28,14 @@
 #include <unistd.h>
 #include <termios.h>
 #include <sys/ioctl.h>
+/* zlib: cosmo ma własną ścieżkę; poza cosmo — systemowy nagłówek. */
+#ifdef __COSMOPOLITAN__
 #include "third_party/zlib/zlib.h"
+#else
+#include <zlib.h>
+#endif
 
-#define VERSION "1.0.13"
+#define VERSION "1.0.14"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
@@ -1144,7 +1155,7 @@ static int sync_tui(Cues*ref,Cues*tgt,Cues*wout,double*scale,double*offset){
             char h[760]; snprintf(h,sizeof h,"\033[%d;1H\033[2K\033[2m%.*s\033[0m",rows-3+c,cols-1,pv); sb_puts(&o,h); }
         { long T[512],R[512]; int m=0; for(int p=0;p<np;p++){ T[m]=work.a[ri[p]].start; R[m]=ref->a[li[p]].start; m++; } double sc,of; sync_transform(T,R,m,&sc,&of);
           char st[300]; snprintf(st,sizeof st,"\033[%d;1H\033[2K\033[7m par: %d   scale=%.4f  offset=%+.3fs   %s\033[0m",rows-1,np,sc,of/1000.0,msg); sb_puts(&o,st); }
-        { char hp[400]; snprintf(hp,sizeof hp,"\033[%d;1H\033[2KTAB kol | %sup/down%s ruch | ENTER zaznacz->laczy | u cofnij | CEL: ,/. +-0.1s  </> +-1s  e czas | a zapis | q wyjscie","",""); sb_puts(&o,hp); }
+        { char hp[400]; snprintf(hp,sizeof hp,"\033[%d;1H\033[2KTAB kol | up/down ruch | ENTER zaznacz->laczy | u cofnij | CEL: ,/. +-0.1s  </> +-1s  e czas | a zapis | q wyjscie",rows); sb_puts(&o,hp); }
         if(write(1,o.b,o.len)<0){} free(o.b); msg[0]=0;
         int k=aq_readkey();
         if(k==-1||k=='q'||k==27) done=1;
@@ -1482,11 +1493,19 @@ static int cmd_np_report(const char*cfgpath,const char*movie,int kind,const char
 /* ---------------------------------------------------------------- HTTPS (TLS) + update
  * Aktywne tylko w buildzie monorepo (-DAQNAPI_TLS, linkowanie third_party/mbedtls). */
 #ifdef AQNAPI_TLS
+#ifdef __COSMOPOLITAN__
 #include "third_party/mbedtls/ssl.h"
 #include "third_party/mbedtls/net_sockets.h"
 #include "third_party/mbedtls/entropy.h"
 #include "third_party/mbedtls/ctr_drbg.h"
 #include "third_party/mbedtls/x509_crt.h"
+#else
+#include <mbedtls/ssl.h>
+#include <mbedtls/net_sockets.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/x509_crt.h>
+#endif
 
 /* prosty cookie-jar dla sesji WWW (napisy24). Włączany globalnie. */
 static char g_cookies[4096]=""; static int g_cookies_on=0;
@@ -1515,8 +1534,13 @@ static char* https_fetch(const char*method,const char*host,const char*path,
     if(mbedtls_ssl_config_defaults(&conf,MBEDTLS_SSL_IS_CLIENT,MBEDTLS_SSL_TRANSPORT_STREAM,MBEDTLS_SSL_PRESET_DEFAULT)) goto done;
     { /* weryfikacja CA: wbudowany bundle /zip/cacert.pem (fallback: systemowy; ostatecznie brak) */
       static mbedtls_x509_crt CA; static int ca_state=0; /* 0=nieładowane 1=ok 2=brak */
-      if(ca_state==0){ mbedtls_x509_crt_init(&CA); size_t cl; char*cb=read_file("/zip/cacert.pem",&cl);
-          if(!cb) cb=read_file("/etc/ssl/certs/ca-certificates.crt",&cl);
+      if(ca_state==0){ mbedtls_x509_crt_init(&CA); size_t cl; char*cb=NULL;
+          /* kolejność: bundle w APE (cosmo), env, typowe ścieżki (Debian/OpenWrt/BSD/Alpine) */
+          static const char*paths[]={"/zip/cacert.pem",NULL,"/etc/ssl/certs/ca-certificates.crt",
+              "/etc/ssl/cert.pem","/etc/pki/tls/certs/ca-bundle.crt","/etc/ssl/ca-bundle.pem",
+              "/usr/local/share/certs/ca-root-nss.crt",NULL};
+          const char*envp=getenv("SSL_CERT_FILE"); paths[1]=envp;
+          for(int i=0;i<7 && !cb;i++){ if(paths[i]) cb=read_file(paths[i],&cl); }
           if(cb && mbedtls_x509_crt_parse(&CA,(const unsigned char*)cb,cl+1)>=0) ca_state=1; else ca_state=2; free(cb); }
       if(ca_state==1){ mbedtls_ssl_conf_ca_chain(&conf,&CA,NULL); mbedtls_ssl_conf_authmode(&conf,MBEDTLS_SSL_VERIFY_REQUIRED); }
       else mbedtls_ssl_conf_authmode(&conf,MBEDTLS_SSL_VERIFY_NONE); }

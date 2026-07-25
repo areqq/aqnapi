@@ -88,6 +88,35 @@ COSMOCC_URL=... c/build.sh
 ./dist/aqnapi-c.com --help
 ```
 
+### Build natywny (bez Cosmopolitan — gcc/clang/musl, OpenWrt)
+
+Źródło jest przenośnym C99 + POSIX — kompiluje się też zwykłym kompilatorem do
+natywnego ELF (przez `#ifdef __COSMOPOLITAN__` include'y `third_party/*` mają
+systemowe warianty `<zlib.h>` / `<mbedtls/*.h>`, a `_GNU_SOURCE` włącza
+`fmemopen`/`strcasestr`).
+
+```sh
+c/build-native.sh                 # host gcc, BAZOWY (offline + HTTP), potrzebuje tylko -lz
+AQNAPI_TLS=1 c/build-native.sh    # + HTTPS (opensubtitles, napisy24 WWW, update, url https)
+                                  #   wymaga systemowego mbedtls (libmbedtls-dev)
+```
+
+Cross-compile pod **OpenWrt** (SDK toolchain):
+
+```sh
+CC="$SDK/staging_dir/toolchain-*/bin/mipsel-openwrt-linux-musl-gcc" \
+CFLAGS="-O2 -I$STAGING_DIR/usr/include" LDFLAGS="-L$STAGING_DIR/usr/lib" \
+AQNAPI_TLS=1 OUT=aqnapi-owrt c/build-native.sh
+# na routerze:  opkg install zlib libmbedtls
+```
+
+Zależności: **zlib** (rozpakowanie ZIP napisy24); **mbedtls** tylko przy
+`AQNAPI_TLS=1`. Weryfikacja CA szuka po kolei: bundle APE (`/zip/cacert.pem`,
+tylko cosmo), `$SSL_CERT_FILE`, typowe ścieżki (Debian/OpenWrt
+`/etc/ssl/certs/ca-certificates.crt`, BSD `/etc/ssl/cert.pem`, itd.) —
+na OpenWrt zainstaluj `ca-bundle`. Build natywny bez TLS nie potrzebuje CA.
+Wyjście binarki natywnej jest **bajtowo zgodne** z cosmo/APE i Pythonem.
+
 ## Zgodność — weryfikacja
 
 Zgodność bajtowa z wersją Python była sprawdzana przez porównanie wyjść na tych

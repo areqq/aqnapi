@@ -192,6 +192,13 @@ wektor AES-256 z FIPS-197). Nie dodawaj testów sieciowych do domyślnego biegu.
 100% zgodności — `aqnapi.py` jest jedynym źródłem prawdy; wersja APE to tylko
 opakowanie. **Nie przepisuj w C** (dryf zachowań łamie wymóg 100% zgodności).
 
+**Build natywny (bez cosmo):** `c/build-native.sh` kompiluje `c/aqnapi.c`
+zwykłym gcc/clang/musl do ELF (OpenWrt itd.). Utrzymuj przenośność: include'y
+`third_party/*` (zlib, mbedtls) są pod `#ifdef __COSMOPOLITAN__` z systemowymi
+wariantami; `_GNU_SOURCE` na górze daje `fmemopen`/`strcasestr`. Nie wprowadzaj
+API tylko-cosmo bez gate'a. Bazowy build (bez TLS) potrzebuje tylko `-lz`; TLS
+(`AQNAPI_TLS=1`) — systemowego mbedtls. CA: `$SSL_CERT_FILE` + typowe ścieżki.
+
 Niezależny **natywny port w C**: `c/aqnapi.c` + `c/build.sh` (cosmocc → `dist/
 aqnapi-c.com`). To już NIE „POC z 4 poleceń" — pokrywa **większość poleceń**
 i jest **100% bajtowo zgodny** z Pythonem dla zaimplementowanego podzbioru:
