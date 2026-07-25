@@ -92,3 +92,50 @@ jobs:
         run: |
           cp dist/aqnapi-c-tls.com aqnapi-c.com
           gh release upload "${GITHUB_REF_NAME}" aqnapi-c.com --clobber
+
+  # Pakiety OpenWrt (.ipk dla wydań stabilnych, .apk dla snapshotu) — natywna
+  # binarka C z TLS, budowana oficjalnym SDK OpenWrt (openwrt/gh-action-sdk).
+  # Jedna formuła (openwrt/aqnapi/Makefile) → per architektura.
+  openwrt:
+    needs: release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86_64-23.05.5              # x86/64 (routery x86, VM, RPi4 64-bit z x86? nie)
+          - aarch64_cortex-a53-23.05.5  # arm64 (wiele routerów/RPi3/4)
+          - mipsel_24kc-23.05.5         # ramips/mt7621 (bardzo popularne)
+          - mips_24kc-23.05.5           # ath79 (klasyczne routery WiFi)
+          - x86_64-SNAPSHOT             # snapshot -> .apk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ustaw PKG_VERSION = tag
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$v/" openwrt/aqnapi/Makefile
+          grep '^PKG_VERSION' openwrt/aqnapi/Makefile
+
+      - name: Zbuduj pakiet w SDK OpenWrt
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ matrix.arch }}
+          FEEDNAME: aqnapi
+          PACKAGES: aqnapi
+          V: s
+
+      - name: Zbierz pakiety (.ipk/.apk)
+        run: |
+          mkdir -p owrt-out
+          find bin -type f \( -name 'aqnapi[-_]*.ipk' -o -name 'aqnapi[-_]*.apk' \) \
+            -exec cp -v {} owrt-out/ \;
+          echo "Zebrane:"; ls -la owrt-out || true
+          # nie przerywaj, jeśli akurat nic (fail-fast=false pokaże który arch)
+          [ -n "$(ls -A owrt-out 2>/dev/null)" ] || { echo "::warning::brak pakietów dla ${{ matrix.arch }}"; exit 0; }
+
+      - name: Wgraj pakiety do wydania
+        if: ${{ hashFiles('owrt-out/*') != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" owrt-out/* --clobber
