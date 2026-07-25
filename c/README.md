@@ -4,12 +4,13 @@ Niezależna reimplementacja aqnapi w czystym C, kompilowana przez
 [`cosmocc`](https://github.com/jart/cosmopolitan) do jednej uniwersalnej binarki
 APE (`dist/aqnapi-c.com`) działającej na Linux/macOS/Windows/*BSD (x86-64+ARM64).
 
-To **pełny natywny port** obok wersji Python (`aqnapi.py`) — pokrywa **większość
-poleceń** i jest **100% bajtowo zgodny** z Pythonem dla zaimplementowanego
-podzbioru. Wersja Python pozostaje kompletna i referencyjna; każda zmiana idzie
-w OBU wersjach (zob. `CLAUDE.md`). `sync` (interaktywny TUI termios+ANSI oraz
-`--offset`/`--anchor`) i `config` (init/show/path) SĄ tutaj. Nie przeniesione
-(użyj `aqnapi.py`): tylko agregujący `upload` (multi-serwis).
+To **pełny natywny port** obok wersji Python (`aqnapi.py`) — pokrywa **100%
+poleceń** i jest **bajtowo zgodny** z Pythonem dla zaimplementowanego zakresu.
+Wersja Python pozostaje kompletna i referencyjna; każda zmiana idzie w OBU
+wersjach (zob. `CLAUDE.md`). Wszystko jest tutaj: offline, downloady, uploady
+(napiprojekt 7z-AES/`--login`, napisy24 attach/WWW, agregujący `upload`),
+account/associate, OpenSubtitles (login/logout/search/download/formats/languages/
+guessit), search, sync (interaktywny TUI), config, update, URL Range.
 
 ## Zakres (stan bieżący)
 
@@ -42,6 +43,7 @@ w OBU wersjach (zob. `CLAUDE.md`). `sync` (interaktywny TUI termios+ANSI oraz
 Własna kryptografia zweryfikowana: **AES-256 (wektor FIPS-197)**, **SHA-256**,
 oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`).
 
+| **agregujący `upload`** (`--service np,n24,os`) | orkiestracja per-serwis (domyślnie `np`); wypisuje `[OK/BŁĄD] serwis: komunikat` w kolejności np→n24→os. np: plain HTTP (oba buildy); n24 walidacja+dry-run (wariant TLS); os: stały komunikat. **Bajtowo == Python** (live: np/os/n24-dry, walidacja wszystkich problemów) |
 | `update [--check]` | **wariant TLS**: HTTPS do GitHub API przez mbedtls, porównanie wersji, podmiana binarki. `--check` zweryfikowany na żywo |
 | `opensubtitles login/logout/search/download/formats/languages/guessit` | **wariant TLS**: pełny klient REST v1 (Api-Key + JWT), HTTPS przez mbedtls, parser JSON. login zapisuje cache tokenu (kompatybilny z Pythonem), logout czyta cache + DELETE. `guessit` — własny pretty-printer JSON (`indent=2`, `ensure_ascii=False`). **Wszystkie bajtowo zgodne z Pythonem** (zweryfikowane kluczem na żywo) |
 | `napisy24 weblogin` | **wariant TLS**: logowanie WWW (Joomla/Community Builder `cb-login`) — cookie-jar + skrobanie tokena CSRF + sesja RSForm. Zweryfikowane na żywo („Zalogowano") |
@@ -66,11 +68,11 @@ opensubtitles) przechodzą, a **podstawiony fałszywy CA jest odrzucany** (test
 negatywny). Fallback: systemowy `ca-certificates.crt`, ostatecznie brak
 weryfikacji, gdy bundla nie ma.
 
-**Jeszcze nie w C**: już tylko agregujący `upload` (multi-serwis; per-serwis
-uploady/attach są). Wszystko inne jest w C — offline, downloady, upload
-7z-AES/`--login`, napiprojekt account/associate, napisy24 login/imdb/attach/WWW,
-search, OpenSubtitles (login/logout/search/download/formats/languages/guessit),
-sync interaktywny, config, update, URL Range, TLS+CA.
+**Pokrycie: 100% poleceń** wersji Python — offline, downloady, uploady
+(napiprojekt 7z-AES/`--login`, napisy24 attach/WWW, **agregujący `upload`**),
+napiprojekt account/associate, napisy24 login/imdb/attach/WWW, search,
+OpenSubtitles (login/logout/search/download/formats/languages/guessit), sync
+interaktywny, config, update, URL Range, TLS+CA.
 
 > `iso-8859-2` jako drugorzędny fallback kodowania oraz kilka rzadkich, niezdefiniowanych
 > bajtów cp1250 są uproszczone względem Pythona (nie dotyczy typowych polskich napisów).
