@@ -103,8 +103,10 @@ aqnapi upload --movie film.mkv --srt film.srt --service np --translator ja
 Wypisuje hasze OSH (`fh`) i MD5-10MiB (`md`), rozmiar i nazwę.
 
 ### `fps FILM`
-Odczytuje FPS z pliku filmowego (MKV / AVI / MP4 / MOV). Oznacza wynik spoza
-bramki zaufania `22 < fps < 32`.
+Odczytuje FPS **oraz czas trwania** z pliku filmowego (MKV / AVI / MP4 / MOV)
+jednym przejściem po kontenerze (`media_info`). Oznacza FPS spoza bramki
+zaufania `22 < fps < 32`; jeśli udało się wyznaczyć czas, wypisuje dodatkowo
+`Czas: HH:MM:SS`. FILM może być ścieżką lub URL-em (Range).
 
 ### `convert WEJŚCIE`
 Konwertuje dowolny obsługiwany format (SRT / MicroDVD / MPL2 / TMPlayer / WebVTT

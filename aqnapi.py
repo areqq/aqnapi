@@ -38,7 +38,7 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.0.16"
+__version__ = "1.0.17"
 USER_AGENT_OS = f"aqnapi v{__version__}"
 
 __all__ = [
@@ -341,43 +341,65 @@ def _mkv_vint(f, first_mask: int = 0xF0) -> Tuple[int, int]:
     return class_id, length
 
 
-def _fps_mkv(f) -> Optional[float]:
-    """FPS z MKV: znajdź DefaultDuration (ns/klatkę) ścieżki wideo."""
+def _mkv_media(f) -> Tuple[Optional[float], Optional[float]]:
+    """(fps, czas_s) z MKV. fps = 1e9/DefaultDuration ścieżki wideo;
+    czas = Segment>Info>Duration (float) × TimecodeScale."""
     track = 0
     f.seek(0)
-    # Elementy-kontenery, w które "wchodzimy" (nie pomijamy zawartości):
-    containers = {0x18538067, 0x1654AE6B, 0xAE}  # Segment, Tracks, TrackEntry
-    for _ in range(1_000_000):  # zabezpieczenie przed pętlą
+    # Elementy-kontenery, w które "wchodzimy" (Segment, Tracks, TrackEntry, Info):
+    containers = {0x18538067, 0x1654AE6B, 0xAE, 0x1549A966}
+    fps = None
+    tc_scale = 1_000_000          # TimecodeScale domyślnie 1 ms (ns)
+    dur_ticks = None
+    for _ in range(2_000_000):    # zabezpieczenie przed pętlą
         try:
             class_id, length = _mkv_vint(f)
         except AqError:
-            return None
+            break
         if class_id == 0x83:  # TrackType
             b = f.read(1)
             track = b[0] if b else 0
-        elif class_id == 0x23E383 and track == 1:  # DefaultDuration (video)
+        elif class_id == 0x23E383 and track == 1 and fps is None:  # DefaultDuration (video)
             raw = f.read(4)
-            if len(raw) < 4:
-                return None
-            ns = struct.unpack(">I", raw)[0]
-            if ns <= 0:
-                return None
-            return 1_000_000_000 / float(ns)
+            if len(raw) == 4:
+                ns = struct.unpack(">I", raw)[0]
+                if ns > 0:
+                    fps = 1_000_000_000 / float(ns)
+        elif class_id == 0x2AD7B1:  # TimecodeScale (uint)
+            raw = f.read(length)
+            if raw:
+                tc_scale = int.from_bytes(raw, "big")
+        elif class_id == 0x4489:  # Duration (float 4/8 B)
+            raw = f.read(length)
+            if length == 4 and len(raw) == 4:
+                dur_ticks = struct.unpack(">f", raw)[0]
+            elif length == 8 and len(raw) == 8:
+                dur_ticks = struct.unpack(">d", raw)[0]
         elif class_id not in containers and class_id != 0x83:
             f.seek(length, 1)
-    return None
+        if fps is not None and dur_ticks is not None:
+            break
+    dur = (dur_ticks * tc_scale / 1e9) if (dur_ticks and dur_ticks > 0) else None
+    return fps, dur
 
 
-def _fps_avi(f) -> Optional[float]:
-    """FPS z AVI: dwMicroSecPerFrame na offsecie 32 (little-endian uint32)."""
+def _avi_media(f) -> Tuple[Optional[float], Optional[float]]:
+    """(fps, czas_s) z AVI: avih.dwMicroSecPerFrame (offset 32) i
+    dwTotalFrames (offset 48)."""
     f.seek(32)
     raw = f.read(4)
     if len(raw) < 4:
-        return None
+        return None, None
     micros = struct.unpack("<I", raw)[0]
-    if micros <= 0:
-        return None
-    return 1_000_000.0 / float(micros)
+    fps = (1_000_000.0 / float(micros)) if micros > 0 else None
+    f.seek(48)
+    raw2 = f.read(4)
+    dur = None
+    if len(raw2) == 4 and micros > 0:
+        frames = struct.unpack("<I", raw2)[0]
+        if frames > 0:
+            dur = frames * micros / 1_000_000.0
+    return fps, dur
 
 
 def _iter_boxes(f, start: int, end: int):
@@ -422,8 +444,9 @@ def _bmff_find(f, start: int, end: int, wanted: str):
     return None
 
 
-def _fps_mp4(f, flen: int) -> Optional[float]:
-    """FPS z MP4/MOV: ścieżka wideo (hdlr=='vide'), mdhd.timescale + stts."""
+def _mp4_media(f, flen: int) -> Tuple[Optional[float], Optional[float]]:
+    """(fps, czas_s) z MP4/MOV: ścieżka wideo (hdlr=='vide'), mdhd.timescale +
+    stts (fps = Σsamples×timescale/Σdur; czas = Σdur/timescale)."""
     for btype, s, p, e in _iter_boxes(f, 0, flen):
         if btype != "moov":
             continue
@@ -470,38 +493,57 @@ def _fps_mp4(f, flen: int) -> Optional[float]:
                 tot_s += c
                 tot_d += c * d
             if timescale and tot_d:
-                return tot_s * timescale / float(tot_d)
-    return None
+                fps = tot_s * timescale / float(tot_d)
+                dur = tot_d / float(timescale)
+                return fps, dur
+    return None, None
 
 
-def _fps_from_stream(f, flen: int) -> Optional[float]:
-    """Rozpoznaj kontener i odczytaj FPS z obiektu plikopodobnego (read/seek)."""
+def _media_from_stream(f, flen: int) -> Tuple[Optional[float], Optional[float]]:
+    """(fps, czas_s) z obiektu plikopodobnego (MKV/AVI/MP4). (None, None) jeśli nie da się."""
     magic = f.read(8)
     f.seek(0)
     if magic[:4] == b"\x1a\x45\xdf\xa3":
-        return _fps_mkv(f)
+        return _mkv_media(f)
     if magic[:4] == b"RIFF":
-        return _fps_avi(f)
+        return _avi_media(f)
     if magic[4:8] == b"ftyp":
-        return _fps_mp4(f, flen)
-    return None
+        return _mp4_media(f, flen)
+    return None, None
 
 
-def fps_from_file(path: str) -> Optional[float]:
-    """Odczytaj FPS z pliku filmowego (MKV/AVI/MP4/MOV). None jeśli się nie da.
+def media_info(path: str) -> Tuple[Optional[float], Optional[float]]:
+    """(fps, czas trwania w sekundach) z pliku filmowego MKV/AVI/MP4/MOV.
     Dla URL-a pobiera tylko ograniczony prefiks (``FPS_URL_PREFIX``) przez Range —
     wystarcza dla MKV/AVI i MP4 z moov na początku (faststart); przy moov na
-    końcu FPS z URL-a jest niedostępny i następuje fallback (metadane/flaga)."""
+    końcu dane z URL-a są niedostępne (fallback)."""
     try:
         if is_url(path):
             size = url_size(path)
             prefix = url_read_range(path, 0, min(FPS_URL_PREFIX, size))
-            return _fps_from_stream(io.BytesIO(prefix), len(prefix))
+            return _media_from_stream(io.BytesIO(prefix), len(prefix))
         with open(path, "rb") as f:
-            return _fps_from_stream(f, os.path.getsize(path))
+            return _media_from_stream(f, os.path.getsize(path))
     except (OSError, struct.error, AqError, NetworkError):
-        return None
-    return None
+        return None, None
+
+
+def fps_from_file(path: str) -> Optional[float]:
+    """Odczytaj FPS z pliku filmowego (MKV/AVI/MP4/MOV). None jeśli się nie da."""
+    return media_info(path)[0]
+
+
+def duration_from_file(path: str) -> Optional[float]:
+    """Czas trwania (sekundy) z pliku filmowego (MKV/AVI/MP4/MOV). None jeśli się nie da."""
+    return media_info(path)[1]
+
+
+def hhmmss(seconds: Optional[float]) -> str:
+    """Sformatuj sekundy jako HH:MM:SS (pusty string dla None/≤0)."""
+    if not seconds or seconds <= 0:
+        return ""
+    s = int(seconds)
+    return "%02d:%02d:%02d" % (s // 3600, (s % 3600) // 60, s % 60)
 
 
 def trusted_fps(value: Optional[float]) -> Optional[float]:
@@ -2190,6 +2232,30 @@ def _n24_scrape_form(page: str) -> List[Tuple[str, str]]:
     return out
 
 
+def n24_release(name: str) -> str:
+    """Sformatuj pole „wydanie/release" wg zasad Napisy24: pomiń tytuł, rok
+    produkcji oraz (dla seriali) SxxExx z początku, a także tagi trackerów/stron
+    (``[eztv]``, ``{SPARROW}``, ``[Site.tv]`` …). Zwraca tylko część release.
+
+    ``Oblivion.2013.720p.BDRip.X264-SPARKS`` → ``720p.BDRip.X264-SPARKS``;
+    ``Under.the.Dome.S01E01.REPACK.HDTV.x264-LOL`` → ``REPACK.HDTV.x264-LOL``."""
+    s = name.strip()
+    # zdejmij rozszerzenie pliku wideo, jeśli jest
+    s = re.sub(r"(?i)\.(mkv|mp4|avi|mov|m4v|ts)$", "", s)
+    m = re.search(r"(?i)S\d{1,2}E\d{1,3}", s)   # serial: po SxxExx
+    if m:
+        s = s[m.end():]
+    else:                                        # film: po roku produkcji
+        y = re.search(r"(?:^|[.\s_-])(?:19|20)\d{2}(?=[.\s_-])", s)
+        if y:
+            s = s[y.end():]
+    s = re.sub(r"[\[\{\(][^\]\}\)]*[\]\}\)]", "", s)   # tagi trackerów/stron
+    s = re.sub(r"^[.\s_\-]+", "", s)
+    s = re.sub(r"[.\s_\-]+$", "", s)
+    s = re.sub(r"\.{2,}", ".", s)
+    return s.strip()
+
+
 def _norm_imdb(imdb_id: str) -> str:
     """Znormalizuj do postaci ttNNNNNNN (9 znaków)."""
     m = re.search(r"(\d+)", imdb_id)
@@ -2905,12 +2971,14 @@ def cmd_hash(args, cfg):
 
 
 def cmd_fps(args, cfg):
-    f = fps_from_file(args.file)
+    f, dur = media_info(args.file)
     if f is None:
         print("Nie udało się odczytać FPS z pliku (obsługa: MKV/AVI/MP4/MOV)")
         return 1
     trusted = "" if trusted_fps(f) else "  (poza bramką 22<fps<32 — traktowane jako niepewne)"
     print(f"FPS: {f:.3f}{trusted}")
+    if dur:
+        print(f"Czas: {hhmmss(dur)}")
     return 0
 
 
@@ -3670,13 +3738,24 @@ def _n24_upload(args, cfg, srt_text: str) -> UploadResult:
     if not login or not password:
         raise AuthError("napisy24 upload wymaga loginu i hasła")
     filebytes = normalize_for_napisy24(srt_text, fix_timing=args.fix_timing)
+    # fps + czas trwania z kontenera filmu (jednym przejściem); release wg zasad N24
+    mfps, mdur = media_info(args.movie) if args.movie else (None, None)
+    rel_src = args.release or (
+        os.path.basename(urllib.parse.urlsplit(args.movie).path if is_url(args.movie)
+                         else args.movie) if args.movie else "")
+    if args.fps:
+        fps_str = "%g" % args.fps
+    elif mfps:
+        fps_str = "%g" % mfps
+    else:
+        fps_str = "23.976"
     meta = {
         "imdb": _norm_imdb(args.imdb) if args.imdb else "",
         "title": args.title or "", "year": args.year or "",
-        "release": args.release or "", "translator": args.translator or "",
-        "resolution": args.resolution or "", "duration": args.duration or "",
-        "size": args.size or (os.path.getsize(args.movie) if args.movie else ""),
-        "fps": str(args.fps or "23.976"),
+        "release": n24_release(rel_src), "translator": args.translator or "",
+        "resolution": args.resolution or "", "duration": args.duration or hhmmss(mdur),
+        "size": args.size or (input_size(args.movie) if args.movie else ""),
+        "fps": fps_str,
         "season": args.season or "", "episode": args.episode or "",
         "episode_title": args.episode_title or "",
     }

@@ -19,7 +19,7 @@ guessit), search, sync (interaktywny TUI), config, update, URL Range.
 | Polecenie | Zgodność |
 |---|---|
 | `hash PLIK` | bajtowo == `aqnapi hash` |
-| `fps PLIK` (MKV/AVI/MP4/MOV) | bajtowo == `aqnapi fps` |
+| `fps PLIK` (MKV/AVI/MP4/MOV) | FPS **oraz czas trwania** (linia `Czas:`) jednym przejściem (`media_from_file`); bajtowo == `aqnapi fps` |
 | `convert` — **wszystkie formaty wejścia** (SRT/MicroDVD/MPL2/TMPlayer/VTT/ASS) | **plik + stdout** bajtowo == `aqnapi convert` |
 | `convert --format srt\|vtt\|ass\|microdvd` (eksport) | bajtowo |
 | flagi: `--strip-sdh --keep-tags --no-sanitize --max-display --min-display` | bajtowo |
@@ -50,7 +50,7 @@ oraz round-trip **7z-AES przez systemowe `7z`** (`aqnapi-c.com _selftest OUT.7z`
 | `update [--check]` | **wariant TLS**: HTTPS do GitHub API przez mbedtls, porównanie wersji, podmiana binarki. `--check` zweryfikowany na żywo |
 | `opensubtitles login/logout/search/download/formats/languages/guessit` | **wariant TLS**: pełny klient REST v1 (Api-Key + JWT), HTTPS przez mbedtls, parser JSON. login zapisuje cache tokenu (kompatybilny z Pythonem), logout czyta cache + DELETE. `guessit` — własny pretty-printer JSON (`indent=2`, `ensure_ascii=False`). **Wszystkie bajtowo zgodne z Pythonem** (zweryfikowane kluczem na żywo) |
 | `napisy24 weblogin` | **wariant TLS**: logowanie WWW (Joomla/Community Builder `cb-login`) — cookie-jar + skrobanie tokena CSRF + sesja RSForm. Zweryfikowane na żywo („Zalogowano") |
-| `napisy24 upload/delete` | **wariant TLS**: upload przez formularz RSForm (multipart, walidacja lokalna ≤2 linie + normalizacja CRLF), delete `?usun=`. Bezpiecznie zweryfikowane: `--dry-run` (jak Python) + `delete` przez autoryzowaną sesję (bez realnego wpisu) |
+| `napisy24 upload/delete` | **wariant TLS**: upload przez formularz RSForm (multipart, walidacja lokalna ≤2 linie + normalizacja CRLF), delete `?usun=`. Pola auto-wypełniane z `--movie`: `release` przez `n24_release` (bajtowo == Python, bateria 8 nazw), czas trwania + fps z kontenera (`media_from_file`), rozmiar = długość pliku. Bezpiecznie zweryfikowane: `--dry-run` (jak Python) + `delete` przez autoryzowaną sesję (bez realnego wpisu) |
 
 ## Dwa warianty binarki C
 

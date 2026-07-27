@@ -35,7 +35,7 @@
 #include <zlib.h>
 #endif
 
-#define VERSION "1.0.16"
+#define VERSION "1.0.17"
 #define CHUNK_10MB (10*1024*1024)
 #define OSH_CHUNK 65536
 #define DEFAULT_FPS 23.976
@@ -279,26 +279,38 @@ static int ebml_read(FILE*f,uint64_t*out,int want_id){
     if(!want_id){ /* wyczyść bit-marker */ uint64_t clear=(uint64_t)1<<(7*len); v&=(clear-1); }
     *out=v; return len;
 }
-static double fps_mkv(FILE*f){
-    fseek(f,0,SEEK_SET);
-    long track=0;
+/* (fps, czas_s) z MKV: DefaultDuration ścieżki wideo + Info>Duration×TimecodeScale */
+static void mkv_media(FILE*f,double*fps,double*dur){
+    *fps=0; *dur=0; fseek(f,0,SEEK_SET);
+    long track=0; uint64_t tc_scale=1000000; double dur_ticks=0;
     for(long guard=0;guard<2000000;guard++){
         uint64_t id,len;
-        if(ebml_read(f,&id,1)<0) return 0;
-        if(ebml_read(f,&len,0)<0) return 0;
+        if(ebml_read(f,&id,1)<0) break;
+        if(ebml_read(f,&len,0)<0) break;
         if(id==0x83){ int b=fgetc(f); track=(b<0)?0:b; }
-        else if(id==0x23E383 && track==1){
-            unsigned char raw[4]; if(fread(raw,1,4,f)!=4) return 0;
-            uint64_t ns=rd_be(raw,4); if(ns==0) return 0; return 1000000000.0/(double)ns;
-        }
-        else if(id!=0x18538067 && id!=0x1654AE6B && id!=0xAE && id!=0x83){
-            fseek(f,(long)len,SEEK_CUR);
-        }
+        else if(id==0x23E383 && track==1 && *fps==0){
+            unsigned char raw[4]; if(fread(raw,1,4,f)==4){ uint64_t ns=rd_be(raw,4); if(ns) *fps=1000000000.0/(double)ns; } }
+        else if(id==0x2AD7B1){ /* TimecodeScale (uint) */
+            if(len>=1 && len<=8){ unsigned char raw[8]; if(fread(raw,1,(size_t)len,f)==(size_t)len) tc_scale=rd_be(raw,(int)len); }
+            else fseek(f,(long)len,SEEK_CUR); }
+        else if(id==0x4489){ /* Duration (float BE 4/8 B) */
+            if(len==4){ unsigned char raw[4]; if(fread(raw,1,4,f)==4){ uint32_t bits=(uint32_t)rd_be(raw,4); float ff; memcpy(&ff,&bits,4); dur_ticks=(double)ff; } }
+            else if(len==8){ unsigned char raw[8]; if(fread(raw,1,8,f)==8){ uint64_t bits=rd_be(raw,8); double dd; memcpy(&dd,&bits,8); dur_ticks=dd; } }
+            else fseek(f,(long)len,SEEK_CUR); }
+        else if(id!=0x18538067 && id!=0x1654AE6B && id!=0xAE && id!=0x1549A966 && id!=0x83){
+            fseek(f,(long)len,SEEK_CUR); }
+        if(*fps!=0 && dur_ticks!=0) break;
     }
-    return 0;
+    if(dur_ticks>0) *dur=dur_ticks*(double)tc_scale/1e9;
 }
-static double fps_avi(FILE*f){ unsigned char b[4]; fseek(f,32,SEEK_SET); if(fread(b,1,4,f)!=4) return 0;
-    uint32_t us=(uint32_t)b[0]|(b[1]<<8)|(b[2]<<16)|((uint32_t)b[3]<<24); if(!us) return 0; return 1000000.0/(double)us; }
+/* (fps, czas_s) z AVI: dwMicroSecPerFrame (off 32) + dwTotalFrames (off 48) */
+static void avi_media(FILE*f,double*fps,double*dur){ *fps=0; *dur=0;
+    unsigned char b[4]; fseek(f,32,SEEK_SET); if(fread(b,1,4,f)!=4) return;
+    uint32_t us=(uint32_t)b[0]|(b[1]<<8)|(b[2]<<16)|((uint32_t)b[3]<<24);
+    if(us) *fps=1000000.0/(double)us;
+    unsigned char b2[4]; fseek(f,48,SEEK_SET);
+    if(fread(b2,1,4,f)==4 && us){ uint32_t fr=(uint32_t)b2[0]|(b2[1]<<8)|(b2[2]<<16)|((uint32_t)b2[3]<<24);
+        if(fr) *dur=(double)fr*(double)us/1000000.0; } }
 
 /* MP4/MOV ISO BMFF: znajdź trak wideo, policz fps z mdhd.timescale + stts */
 static long box_next(FILE*f,long pos,long end,char type[5],long*payload){
@@ -318,7 +330,8 @@ static int bmff_find(FILE*f,long start,long end,const char*want,long*p_out,long*
         pos=nx; }
     return 0;
 }
-static double fps_mp4(FILE*f,long flen){
+/* (fps, czas_s) z MP4/MOV: ścieżka wideo, mdhd.timescale + stts */
+static void mp4_media(FILE*f,long flen,double*fps,double*dur){ *fps=0; *dur=0;
     long pos=0; char t[5]; long pl;
     while(pos>=0 && pos<flen){ long nx=box_next(f,pos,flen,t,&pl); if(nx<0) break;
         if(!strcmp(t,"moov")){
@@ -328,7 +341,6 @@ static double fps_mp4(FILE*f,long flen){
                 if(!strcmp(tt,"trak")){ tp=tpl; te=tnx;
                     if(bmff_find(f,tp,te,"mdia",&mp,&me)){
                         if(bmff_find(f,mp,me,"hdlr",&hp,&he)){
-                            /* payload: version+flags(4) + pre_defined(4) + handler(4) */
                             fseek(f,hp+8,SEEK_SET); unsigned char hd[4];
                             if(fread(hd,1,4,f)==4 && memcmp(hd,"vide",4)==0){
                                 if(bmff_find(f,mp,me,"mdhd",&dhp,&dhe)){
@@ -343,7 +355,7 @@ static double fps_mp4(FILE*f,long flen){
                                         uint64_t tot_s=0,tot_d=0;
                                         for(uint32_t i=0;i<nent;i++){ unsigned char e8[8]; if(fread(e8,1,8,f)!=8) break;
                                             uint64_t c=rd_be(e8,4), d=rd_be(e8+4,4); tot_s+=c; tot_d+=c*d; }
-                                        if(timescale && tot_d) return (double)tot_s*(double)timescale/(double)tot_d;
+                                        if(timescale && tot_d){ *fps=(double)tot_s*(double)timescale/(double)tot_d; *dur=(double)tot_d/(double)timescale; return; }
                                     }
                                 }
                             }
@@ -353,30 +365,35 @@ static double fps_mp4(FILE*f,long flen){
                 tpos=tnx; }
         }
         pos=nx; }
-    return 0;
 }
-/* Rozpoznaj kontener i odczytaj FPS z otwartego strumienia (flen = długość danych). */
-static double fps_from_stream(FILE*f,long flen){
-    unsigned char m[8]; size_t r=fread(m,1,8,f); double v=0; rewind(f);
-    if(r>=4 && m[0]==0x1a&&m[1]==0x45&&m[2]==0xdf&&m[3]==0xa3) v=fps_mkv(f);
-    else if(r>=4 && !memcmp(m,"RIFF",4)) v=fps_avi(f);
-    else if(r>=8 && !memcmp(m+4,"ftyp",4)) v=fps_mp4(f,flen);
-    return v;
+/* Rozpoznaj kontener i odczytaj (fps, czas) z otwartego strumienia (flen = długość danych). */
+static void media_from_stream(FILE*f,long flen,double*fps,double*dur){
+    *fps=0; *dur=0; unsigned char m[8]; size_t r=fread(m,1,8,f); rewind(f);
+    if(r>=4 && m[0]==0x1a&&m[1]==0x45&&m[2]==0xdf&&m[3]==0xa3) mkv_media(f,fps,dur);
+    else if(r>=4 && !memcmp(m,"RIFF",4)) avi_media(f,fps,dur);
+    else if(r>=8 && !memcmp(m+4,"ftyp",4)) mp4_media(f,flen,fps,dur);
 }
-/* Ile bajtów prefiksu pobrać z URL-a do odczytu FPS (jak w Pythonie: 8 MiB). */
+/* Ile bajtów prefiksu pobrać z URL-a do odczytu FPS/czasu (jak w Pythonie: 8 MiB). */
 #define FPS_URL_PREFIX (8*1024*1024)
-static double fps_from_file(const char*path){
+/* (fps, czas_s) z pliku MKV/AVI/MP4/MOV; URL: prefiks przez Range. */
+static void media_from_file(const char*path,double*fps,double*dur){
+    *fps=0; *dur=0;
     if(is_url(path)){
-        long size=url_size(path); if(size<=0) return 0;
+        long size=url_size(path); if(size<=0) return;
         long want = size<FPS_URL_PREFIX ? size : FPS_URL_PREFIX;
-        size_t n=0; unsigned char*buf=url_read_range(path,0,want,&n); if(!buf||!n){ free(buf); return 0; }
-        FILE*f=fmemopen(buf,n,"rb"); double v=0; if(f){ v=fps_from_stream(f,(long)n); fclose(f); }
-        free(buf); return v;
+        size_t n=0; unsigned char*buf=url_read_range(path,0,want,&n); if(!buf||!n){ free(buf); return; }
+        FILE*f=fmemopen(buf,n,"rb"); if(f){ media_from_stream(f,(long)n,fps,dur); fclose(f); }
+        free(buf); return;
     }
-    FILE*f=fopen(path,"rb"); if(!f) return 0;
+    FILE*f=fopen(path,"rb"); if(!f) return;
     fseek(f,0,SEEK_END); long fl=ftell(f); fseek(f,0,SEEK_SET);
-    double v=fps_from_stream(f,fl); fclose(f); return v;
+    media_from_stream(f,fl,fps,dur); fclose(f);
 }
+static double fps_from_file(const char*path){ double fps,dur; media_from_file(path,&fps,&dur); return fps; }
+static double duration_from_file(const char*path){ double fps,dur; media_from_file(path,&fps,&dur); return dur; }
+/* sformatuj sekundy jako HH:MM:SS (pusty string dla <=0) */
+static void hhmmss(double seconds,char*out,size_t osz){ if(seconds<=0){ if(osz)out[0]=0; return; }
+    long s=(long)seconds; snprintf(out,osz,"%02ld:%02ld:%02ld",s/3600,(s%3600)/60,s%60); }
 static double trusted_fps(double v){ return (v>22.0 && v<32.0)?v:0.0; }
 
 /* ---------------------------------------------------------------- base64 dekoder */
@@ -994,10 +1011,12 @@ static int cmd_hash(const char*path){
     printf("nazwa           : %s\n",nm);
     return 0;
 }
-static int cmd_fps(const char*path){ double f=fps_from_file(path);
+static int cmd_fps(const char*path){ double f,dur; media_from_file(path,&f,&dur);
     if(f==0){ printf("Nie udało się odczytać FPS z pliku (obsługa: MKV/AVI/MP4/MOV)\n"); return 1; }
     const char*note = trusted_fps(f)? "":"  (poza bramką 22<fps<32 — traktowane jako niepewne)";
-    printf("FPS: %.3f%s\n",f,note); return 0;
+    printf("FPS: %.3f%s\n",f,note);
+    if(dur>0){ char t[16]; hhmmss(dur,t,sizeof t); printf("Czas: %s\n",t); }
+    return 0;
 }
 static double resolve_fps(const char*movie,double server_fps,double flag_fps){
     if(movie){ double f=trusted_fps(fps_from_file(movie)); if(f) return f; }
@@ -1281,6 +1300,32 @@ static int xml_next(const char**pp,char*tag,size_t tagsz,char**inner){
     if(!ce){ char*z=xmalloc(1); z[0]=0; *inner=z; *pp=ot+1; return 1; }
     size_t il=(size_t)(ce-(ot+1)); char*in=xmalloc(il+1); memcpy(in,ot+1,il); in[il]=0; *inner=in;
     *pp=ce+strlen(close); return 1; }
+/* Pole „wydanie/release" wg zasad Napisy24: pomiń tytuł/rok/SxxExx z początku
+ * oraz tagi trackerów [..]{..}(..). Odpowiednik n24_release() w Pythonie. */
+static void n24_release(const char*name,char*out,size_t osz){
+    char s[512]; snprintf(s,sizeof s,"%s",name?name:"");
+    size_t L=strlen(s);
+    static const char*exts[]={".mkv",".mp4",".avi",".mov",".m4v",".ts"};
+    for(int i=0;i<6;i++){ size_t el=strlen(exts[i]); if(L>=el && !strcasecmp(s+L-el,exts[i])){ s[L-el]=0; L-=el; break; } }
+    /* SxxExx (case-insensitive) — bierz to co po odcinku; wpp. po roku 19xx/20xx */
+    long cut=-1;
+    for(size_t i=0;i+3<L;i++){ if((s[i]=='S'||s[i]=='s')&&isdigit((unsigned char)s[i+1])){ size_t j=i+1; while(j<L&&isdigit((unsigned char)s[j])&&j-i<=2)j++;
+        if(j<L&&(s[j]=='E'||s[j]=='e')&&isdigit((unsigned char)s[j+1])){ size_t k=j+1; while(k<L&&isdigit((unsigned char)s[k])&&k-j<=3)k++; cut=(long)k; break; } } }
+    if(cut<0){ for(size_t i=0;i+4<=L;i++){ int sep0=(i==0)||s[i-1]=='.'||s[i-1]==' '||s[i-1]=='_'||s[i-1]=='-';
+        if(sep0 && (s[i]=='1'||s[i]=='2') && (s[i+1]=='9'||s[i+1]=='0') && isdigit((unsigned char)s[i+2]) && isdigit((unsigned char)s[i+3])){
+            char nx=(i+4<L)?s[i+4]:'.'; if(nx=='.'||nx==' '||nx=='_'||nx=='-'){ cut=(long)(i+4); break; } } } }
+    char *p = (cut>=0)? s+cut : s;
+    /* usuń tagi w [] {} () i przepisz resztę */
+    char tmp[512]; size_t o=0; int depth=0;
+    for(char*q=p;*q&&o<sizeof tmp-1;q++){ if(*q=='['||*q=='{'||*q=='('){depth++;continue;} if(*q==']'||*q=='}'||*q==')'){ if(depth)depth--; continue;} if(!depth) tmp[o++]=*q; }
+    tmp[o]=0;
+    /* trim wiodących/końcowych separatorów; collapse ".." */
+    size_t a=0; while(tmp[a]=='.'||tmp[a]==' '||tmp[a]=='_'||tmp[a]=='-')a++;
+    size_t b=strlen(tmp); while(b>a&&(tmp[b-1]=='.'||tmp[b-1]==' '||tmp[b-1]=='_'||tmp[b-1]=='-'))b--;
+    char res[512]; size_t ro=0; int prevdot=0;
+    for(size_t i=a;i<b&&ro<sizeof res-1;i++){ if(tmp[i]=='.'){ if(prevdot)continue; prevdot=1; } else prevdot=0; res[ro++]=tmp[i]; }
+    res[ro]=0; snprintf(out,osz,"%s",res);
+}
 static void norm_imdb(const char*in,char*out,size_t osz){ char dig[32]; int k=0; for(const char*p=in;*p&&k<31;p++) if(isdigit((unsigned char)*p)) dig[k++]=*p; dig[k]=0;
     if(k==0){ snprintf(out,osz,"%s",in); return; } char z[8]=""; int pad=7-k; for(int i=0;i<pad&&i<7;i++) z[i]='0'; z[pad>0?pad:0]=0; snprintf(out,osz,"tt%s%s",z,dig); }
 static void extract_tt(const char*s,char*out,size_t osz){ out[0]=0; /* znajdź "tt" po którym są cyfry (jak regex tt\d+) */
@@ -1991,7 +2036,12 @@ static int cmd_agg_upload(const char*cfgpath,const char*service,const char*srt,c
             else {
                 char szbuf[32]=""; if(a_size&&a_size[0]) snprintf(szbuf,sizeof szbuf,"%s",a_size); else if(movie) snprintf(szbuf,sizeof szbuf,"%ld",input_size(movie));
                 char imn[16]=""; if(imdb&&imdb[0]) norm_imdb(imdb,imn,sizeof imn);
-                N24Meta m={imn,title,title_pl,year,release,translator,a_sync,proof,resolution,duration,szbuf,fpsstr&&fpsstr[0]?fpsstr:"23.976",season,episode,episode_title};
+                double mfps=0,mdur=0; if(movie) media_from_file(movie,&mfps,&mdur);
+                char durb[16]=""; if(duration&&duration[0]) snprintf(durb,sizeof durb,"%s",duration); else hhmmss(mdur,durb,sizeof durb);
+                char relb[256]; { char nb[512]; if(movie) input_basename(movie,nb,sizeof nb); else nb[0]=0;
+                    n24_release((release&&release[0])?release:nb,relb,sizeof relb); }
+                char fpsb[16]="23.976"; if(fpsstr&&fpsstr[0]) snprintf(fpsb,sizeof fpsb,"%s",fpsstr); else if(mfps>0) snprintf(fpsb,sizeof fpsb,"%g",mfps);
+                N24Meta m={imn,title,title_pl,year,relb,translator,a_sync,proof,resolution,durb[0]?durb:NULL,szbuf,fpsb,season,episode,episode_title};
                 int ok; char*msg=n24_web_upload_run(cfgpath,srt,text,&m,&ok);
                 printf("[%s] napisy24: %s\n", ok?"OK":"BŁĄD", msg); free(msg); if(!ok) rc=1; } }
 #else
@@ -2479,8 +2529,14 @@ int main(int argc,char**argv){
             return cmd_n24_attach(cfgpath,movie,srt,imdb,duration,resolution,fpsb[0]?fpsb:NULL,check_only); }
         if(!strcmp(sub,"upload")){
 #ifdef AQNAPI_TLS
-            char fpsb[16]=""; if(fps>0) snprintf(fpsb,sizeof fpsb,"%g",fps);
-            N24Meta m={imdb,title,title_pl,year,release,translator,a_sync,proof,resolution,duration,a_size,fpsb[0]?fpsb:NULL,season,episode,episode_title};
+            /* fps + czas z kontenera filmu; release wg zasad N24; rozmiar z filmu */
+            double mfps=0,mdur=0; if(movie) media_from_file(movie,&mfps,&mdur);
+            char fpsb[16]=""; if(fps>0) snprintf(fpsb,sizeof fpsb,"%g",fps); else if(mfps>0) snprintf(fpsb,sizeof fpsb,"%g",mfps);
+            char durb[16]=""; if(duration&&duration[0]) snprintf(durb,sizeof durb,"%s",duration); else hhmmss(mdur,durb,sizeof durb);
+            char relb[256]; { char nb[512]; if(movie) input_basename(movie,nb,sizeof nb); else nb[0]=0;
+                n24_release((release&&release[0])?release:nb,relb,sizeof relb); }
+            char szb[32]=""; if(a_size&&a_size[0]) snprintf(szb,sizeof szb,"%s",a_size); else if(movie) snprintf(szb,sizeof szb,"%ld",input_size(movie));
+            N24Meta m={imdb,title,title_pl,year,relb,translator,a_sync,proof,resolution,durb[0]?durb:NULL,szb[0]?szb:NULL,fpsb[0]?fpsb:NULL,season,episode,episode_title};
             return cmd_n24_upload(cfgpath,srt,&m,testing);
 #else
             fprintf(stderr,"napisy24 upload wymaga wariantu TLS (aqnapi-c-tls.com)\n"); return 2;
