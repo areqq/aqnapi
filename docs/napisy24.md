@@ -517,11 +517,16 @@ Opcje metadanych (mapowane na pola `form[...]`):
 
 * `--imdb ttNNNNNNN` — `form[form_dodajIMDB]`
 * `--title "..."` / `--title-pl "..."` — tytuł / tytuł polski
-* `--year`, `--release` — rok, nazwa wydania
+* `--year`, `--release` — rok, nazwa wydania. Wartość `release` (albo — gdy
+  pominięto flagę — nazwa pliku z `--movie`) jest przepuszczana przez
+  `n24_release()`: zostaje sama część wydania (bez tytułu, roku, `SxxExx`,
+  tagów trackerów `[...]`/`{...}`/`(...)`), zgodnie z zasadami serwisu.
 * `--translator`, `--sync`, `--proof` — tłumacz / synchro / korekta
 * `--resolution WxH` — `form[form_dodaj_rozdzielczosc]`
-* `--duration HH:MM:SS` — `form[form_czas_cd1]`
-* `--size`, `--fps` — rozmiar filmu w bajtach, fps
+* `--duration HH:MM:SS` — `form[form_czas_cd1]`; gdy pominięte, jest wyznaczane
+  z kontenera `--movie` (`media_info` → MKV/MP4/AVI, format `HH:MM:SS`).
+* `--size`, `--fps` — rozmiar filmu w bajtach, fps. Gdy pominięte, oba brane są
+  z `--movie` (rozmiar = długość pliku, fps z kontenera).
 * `--season N` / `--episode M` / `--episode-title "..."` — dla seriali
   (przełącza `form[form_typ]` na `Serial`)
 * `-l/--lang` (domyślnie `PL`), `--corrected`, `--comment`
