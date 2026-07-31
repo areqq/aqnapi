@@ -22,6 +22,12 @@ zamień na `./aqnapi …` — składnia identyczna.
    Kolejność źródeł: flagi CLI > zmienne środowiskowe > `config.ini`. Klucz API
    OpenSubtitles i loginy trzymaj w `config.ini`; **nigdy nie wpisuj haseł do
    logów ani komend commitowanych** — `-v` loguje żądania z maskowaniem haseł.
+   Doraźnie poświadczenia można podać flagami przy `get`/`search`/`upload`:
+   `--n24-user`/`--n24-pass`, `--np-user`/`--np-pass`,
+   `--os-api-key`/`--os-user`/`--os-pass` (albo odpowiednie zmienne środowiskowe).
+   Flagi globalne (przed podpoleceniem): `-v` (log żądań), `--timeout SEK`,
+   `--config ŚCIEŻKA`, `--version`. Wersja odniesienia tego skilla: **1.0.17**
+   (po `aqnapi update` zweryfikuj listy podpoleceń przez `--help`).
 
 2. **Wejście może być URL-em.** Każdy argument-plik (`--movie`, `--srt`,
    `input`, `file`, `reference`/`target`, listy `merge`) może być
@@ -57,7 +63,9 @@ python3 aqnapi.py fps film.mkv                           # FPS + czas trwania z 
 python3 aqnapi.py fpsconv in.srt --from 25 --to 23.976 -o out.srt
 python3 aqnapi.py fpsconv in.srt --movie film.mkv        # docelowy FPS z filmu
 python3 aqnapi.py merge cd1.srt cd2.srt -o full.srt      # offset auto = koniec poprzedniego
+python3 aqnapi.py merge cd1.srt cd2.srt --offset 3600 -o full.srt  # ręczne przesunięcie (powtarzalne)
 python3 aqnapi.py split in.srt --at 00:45:00 -o part     # punkt podziału powtarzalny
+python3 aqnapi.py split in.srt --at 00:45:00 --no-rebase # nie zeruj czasów części po podziale
 ```
 Formaty wejścia: SRT / MicroDVD / MPL2 / TMPlayer / WebVTT / ASS·SSA. MicroDVD
 wymaga FPS — podaj `--fps` lub `--movie`.
@@ -110,14 +118,21 @@ python3 aqnapi.py upload --srt napisy.srt --movie film.mkv \
   `--movie` (czas i fps przez parser MKV/MP4/AVI, rozmiar = długość pliku). Nie
   wyliczaj czasu z ostatniej kwestii `.srt` — kończy się przed końcem odcinka.
 - Serial: `--season`, `--episode`, `--episode-title` przełączają typ na „Serial”.
+- Pozostałe pola metadanych (wszystkie przyjmują wartość): `--imdb ttNNNNNNN`,
+  `--title`, `--title-pl`, `--year`, `-l/--lang` (domyślnie `PL`), oraz znaczniki
+  jakości `--sync`, `--proof`, `--resolution WxH`, `--comment`. **`--corrected`
+  to flaga bez wartości** (nie podawaj jej argumentu — inaczej parser potraktuje
+  następny token jako pozycyjny).
 
 ## Polecenia per-serwis (zaawansowane)
-- `napisy24`: `download`, `search`, `getid`, `imdb`, `attach`, `edit`
-  (edycja własnego wpisu WWW), `mediainfo`, `notify`, `trans`, `premieres`,
-  `delete/rm`, `login`, `hash`.
-- `napiprojekt`: `download`, `search`, `associate`, `fileinfo`, `upload`,
-  `cover` (okładka+ocena), `version`, `report`. (`info`/mediainfo świadomie
-  pominięte — wymagałoby zewnętrznego binarium.)
+Pełne, aktualne listy zawsze z `python3 aqnapi.py <serwis> --help` (poniżej stan
+1.0.17):
+- `napisy24`: `download`, `search`, `getid`, `imdb`, `upload` (wpis publiczny WWW),
+  `attach`, `edit` (edycja własnego wpisu WWW), `mediainfo` (alias `changedata`),
+  `notify`, `trans`, `premieres` (alias `getimdb`), `delete`/`rm`, `login`, `hash`.
+- `napiprojekt`: `download`, `search`, `associate`, `account`, `fileinfo`,
+  `upload`, `cover` (okładka+ocena), `version`, `report`. (`info`/mediainfo
+  świadomie pominięte — wymagałoby zewnętrznego binarium.)
 - `opensubtitles`: `login`, `logout`, `search`, `download`, `formats`,
   `languages`, `guessit`.
 
@@ -125,14 +140,17 @@ python3 aqnapi.py upload --srt napisy.srt --movie film.mkv \
 - Napisy zawsze wychodzą jako **SRT UTF-8 z BOM, końce LF** — to celowe, nie
   „naprawiaj” tego.
 - Sanityzacja jest domyślnie włączona (usuwanie tagów, docinanie ekstremalnych
-  i nakładających się czasów, naprawa odwróconych). Wyłącz świadomie:
-  `--keep-tags`, `--no-sanitize`, `--max-display`, `--min-display`; SDH/HI:
-  `--strip-sdh`.
+  i nakładających się czasów, naprawa odwróconych). Flagi
+  `--keep-tags`/`--no-sanitize`/`--max-display`/`--min-display` oraz `--strip-sdh`
+  (SDH/HI) działają w `get`, `search` i `convert` (nie w `merge`/`split`).
 - Upload jest nieodwracalny i publiczny (napisy24 WWW) lub trafia do moderacji
   (napiprojekt `--login`) — **potwierdź z użytkownikiem i użyj `--dry-run`**
   przed realnym wysłaniem.
 - Komunikaty narzędzia są po polsku; kody wyjścia ≠0 oznaczają błąd.
 
 ## Pomoc
-`python3 aqnapi.py <polecenie> --help`. Pełna referencja: `docs/cli.md`;
-protokoły: `docs/napisy24.md`, `docs/napiprojekt.md`, `docs/opensubtitles.md`.
+Źródło prawdy dla flag i podpoleceń to zawsze `python3 aqnapi.py <polecenie> --help`
+(także `<serwis> <podpolecenie> --help`) — używaj go, gdy skill i `--help` się
+rozjadą po aktualizacji. W checkoutcie repo dodatkowo: pełna referencja
+`docs/cli.md`; protokoły `docs/napisy24.md`, `docs/napiprojekt.md`,
+`docs/opensubtitles.md`.
